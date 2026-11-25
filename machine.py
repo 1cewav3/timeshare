@@ -39,7 +39,7 @@ FADE = "#8d856f"
 SHADOW = "#b9b19c"
 
 W, H = 1180, 700
-BUILD = "b8348bc1"
+BUILD = time.strftime("build %m-%d %H:%M", time.localtime(os.path.getmtime(__file__)))
 LOG = "/tmp/timeshare-launch.log"
 PX0, PX1 = 648, 1164          # paper sheet
 LX0, LX1 = 16, 632            # left column
