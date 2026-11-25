@@ -35,9 +35,12 @@ COMMANDS
   STAFF           who works for you and what they cost
   HIRE <role>     take someone on      FIRE <role>     let them go
   UPGRADES        permanent equipment you can buy
-  BUY <upgrade>   buy it
+  BUY <upgrade>   order it; the engineers fit it over a while
   SITES           locations you could run the machine from
-  MOVE <n>        relocate the machine
+  MOVE <n>        relocate the machine (it is off while it is in the van)
+  PROJECT         work under way, and how long it has left
+  INCIDENT        the question waiting for you, and its choices
+  DECIDE <word>   answer it; unanswered, the default is taken for you
   MODS            buffs and debuffs currently in force
   PRESTIGE        sell the business and start again, better
   GOAL            what you are working towards, and how far away it is
@@ -314,3 +317,98 @@ LESSONS = [
 ]
 LESSON_GRANT = "A GRANT: {fee:.0f} PAID WHETHER WE TAKE IT OR NOT."
 LESSON_PAID = "{company}: GRANT OF {fee:.0f} PAID."
+
+# ---- long projects ------------------------------------------------------------
+# Some things take time. While a project runs its `while` effects apply; when
+# it finishes, its result lands. One project at a time: the engineers are busy.
+MOVE_TICKS = 240             # the machine is in the van: no capacity at all
+MOVE_WHILE = {"capacity_mult": 0.0}
+INSTALL_TICKS = 90           # an upgrade is fitted over this many ticks
+INSTALL_WHILE = {"capacity_mult": 0.9}   # the engineers have a panel off
+
+# ---- incidents: the machine asks the operator a question ---------------------
+# One open at a time, rolled every `incident_every` ticks once the teaching
+# offers are done. While it waits, `while` applies (that is why it matters);
+# after `ticks` the first choice listed as `default` is taken for you.
+# An outcome may hold: money, rep, mod (name, ticks, effects, good),
+# fault ("line" or "module"), project (name, ticks, while, then-mod).
+INCIDENT_EVERY = 400
+INCIDENT_CHANCE = 0.5
+
+INCIDENTS = [
+    {"key": "payroll", "title": "CROWN MILLS RAN THEIR PAYROLL TWICE",
+     "text": "THEIR NIGHT OPERATOR RAN THE PAYROLL JOB TWICE AND THEY WANT THE "
+             "TIME BACK. THEIR CLERK RINGS EVERY HOUR UNTIL WE ANSWER.",
+     "while": {"demand_mult": 0.95}, "ticks": 120, "default": "REFUSE",
+     "choices": [
+         ("REFUND", "give them the time back", {"money": -20.0, "rep": 0.6,
+                                               "say": "REFUNDED. CROWN MILLS TELL THEIR FRIENDS."}),
+         ("SPLIT", "meet them halfway", {"money": -10.0, "rep": 0.2,
+                                         "say": "SPLIT THE DIFFERENCE. NOBODY IS DELIGHTED."}),
+         ("REFUSE", "their operator, their problem", {"rep": -0.8,
+                                                     "say": "REFUSED. CROWN MILLS TELL THEIR FRIENDS."}),
+     ]},
+    {"key": "fan", "title": "A COOLING FAN IS SCREAMING",
+     "text": "THE FAN IN THE MODULE CABINET HAS STARTED TO SCREAM. THE ENGINEER "
+             "CAN SWAP IT NOW, WITH HALF THE MACHINE OFF FOR AN HOUR, OR WE RUN "
+             "IT AND HOPE.",
+     "while": {"fault_mult": 1.5}, "ticks": 120, "default": "RUN",
+     "choices": [
+         ("SWAP", "an hour at half capacity, 15 for the part",
+          {"money": -15.0, "project": ("FAN SWAP", 60, {"capacity_mult": 0.5}, None),
+           "say": "THE ENGINEER HAS THE CABINET OPEN."}),
+         ("RUN", "leave it and listen", {"mod": ("SCREAMING FAN", 600, {"fault_mult": 2.0}, False),
+                                        "say": "WE RUN IT. EVERYONE IN THE ROOM WEARS EAR DEFENDERS."}),
+     ]},
+    {"key": "student", "title": "A STUDENT OFFERS A BETTER BILLING PROGRAM",
+     "text": "A STUDENT FROM THE POLYTECHNIC SAYS HE CAN REWRITE OUR BILLING "
+             "PROGRAM SO IT CATCHES THE MINUTES WE MISS. HE WANTS 40.",
+     "while": {}, "ticks": 180, "default": "DECLINE",
+     "choices": [
+         ("HIRE", "40 for the work", {"money": -40.0,
+                                      "mod": ("NEW BILLING PROGRAM", 1440, {"rate_mult": 1.06}, True),
+                                      "say": "THE NEW BILLING RUN CATCHES MINUTES WE NEVER KNEW WE LOST."}),
+         ("DECLINE", "the old program works", {"say": "HE GOES TO WORK FOR THE COMPETITION."}),
+     ]},
+    {"key": "reroute", "title": "THE TELEPHONE PEOPLE WANT TO RE-ROUTE US",
+     "text": "THE EXCHANGE WANTS TO MOVE OUR LINES ONTO THE NEW SWITCH. TWO HOURS "
+             "OF REDUCED SERVICE, AND A CHEAPER TARIFF AFTERWARDS.",
+     "while": {}, "ticks": 240, "default": "DECLINE",
+     "choices": [
+         ("AGREE", "two hours at 60%, cheaper after",
+          {"project": ("RE-ROUTING", 120, {"capacity_mult": 0.6},
+                       ("NEW SWITCH", 2880, {"cost_mult": 0.92}, True)),
+           "say": "THE EXCHANGE ENGINEERS ARE ON THE ROOF."}),
+         ("DECLINE", "keep the old switch", {"say": "WE STAY ON THE OLD SWITCH."}),
+     ]},
+    {"key": "argus", "title": "THE EVENING ARGUS WANTS A TOUR",
+     "text": "A REPORTER FROM THE EVENING ARGUS WANTS TO SEE THE MACHINE ROOM "
+             "FOR A PIECE ON THE COMPUTER AGE.",
+     "while": {}, "ticks": 150, "default": "REFUSE",
+     "choices": [
+         ("SHOW", "let them in", {"mod": ("IN THE PAPER", 600, {"demand_mult": 1.15}, True),
+                                  "rep": 0.3, "say": "WE ARE ON PAGE FOUR, WITH A PHOTOGRAPH."}),
+         ("REFUSE", "the room is a mess", {"say": "THE PIECE RUNS WITHOUT US."}),
+     ]},
+    {"key": "ceiling", "title": "WATER IS COMING THROUGH THE CEILING",
+     "text": "THERE IS WATER COMING THROUGH THE CEILING ABOVE THE LINE RACK. "
+             "A PLUMBER WILL COST REAL MONEY; A TARPAULIN WILL NOT.",
+     "while": {"fault_mult": 1.6}, "ticks": 90, "default": "IGNORE",
+     "choices": [
+         ("PLUMBER", "35, and it is fixed", {"money": -35.0, "say": "THE PLUMBER FINDS A CRACKED TANK."}),
+         ("TARPAULIN", "5, and it mostly holds", {"money": -5.0,
+                                                 "mod": ("TARPAULIN", 400, {"fault_mult": 1.3}, False),
+                                                 "say": "THE TARPAULIN SAGS BUT HOLDS."}),
+         ("IGNORE", "it will stop", {"fault": "line", "say": "IT DID NOT STOP. A LINE IS DEAD."}),
+     ]},
+    {"key": "debtor", "title": "ACCOUNT 0047 HAS NOT PAID IN THREE MONTHS",
+     "text": "CUSTOMER 0047 OWES THREE MONTHS AND STILL DIALS IN EVERY MORNING.",
+     "while": {"rate_mult": 0.97}, "ticks": 200, "default": "RIDE",
+     "choices": [
+         ("CUT", "cut them off", {"rep": -0.2, "say": "0047 IS CUT OFF. THE LINE IS FREE."}),
+         ("CHASE", "send the clerk round", {"money": 18.0, "rep": -0.3,
+                                           "say": "THE CLERK COMES BACK WITH 18 AND A BLACK EYE."}),
+         ("RIDE", "let it ride", {"mod": ("BAD DEBTS", 600, {"rate_mult": 0.97}, False),
+                                  "say": "0047 KEEPS DIALLING. SO DO HIS FRIENDS."}),
+     ]},
+]

@@ -50,7 +50,13 @@ def main():
     rev_before = w.revenue
     ok, msg = M.do_buy_upgrade(w, "second shift")
     checks.append(("an upgrade can be bought by name, case-insensitively", ok))
-    checks.append(("the upgrade raises revenue", w.revenue > rev_before))
+    checks.append(("an upgrade is fitted over time, not at once",
+                   "SECOND SHIFT" not in w.owned and w.project is not None))
+    ok2, _ = M.do_buy_upgrade(w, "COOLING PLANT")
+    checks.append(("one job at a time for the engineers", not ok2))
+    while w.project:
+        w.advance_project()
+    checks.append(("the upgrade raises revenue once fitted", w.revenue > rev_before))
     ok, msg = M.do_buy_upgrade(w, "SECOND SHIFT")
     checks.append(("the same upgrade cannot be bought twice", not ok))
     ok, msg = M.do_buy_upgrade(w, "MOON BASE")
@@ -60,7 +66,11 @@ def main():
     ceiling_before = w.ceiling
     rent_before = C.LOCATIONS[w.site][3]
     ok, msg = M.do_move(w, ["1"])
-    checks.append(("moving to the next site works", ok and w.site == 1))
+    checks.append(("a move puts the machine in the van", ok and w.site == 0
+                   and w.capacity == 0))
+    while w.project:
+        w.advance_project()
+    checks.append(("moving to the next site works", w.site == 1 and w.capacity > 0))
     checks.append(("the new site has a bigger market", w.ceiling > ceiling_before))
     checks.append(("the new site costs more rent", C.LOCATIONS[w.site][3] > rent_before))
     ok, msg = M.do_move(w, ["0"])

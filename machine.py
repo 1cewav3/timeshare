@@ -386,6 +386,11 @@ class Machine:
         # the fault count rides beside CASH; placed in paint(), after the cash figure
         self.fault_text = c.create_text(PX0 + 30, 96 + self.head_ls // 2, anchor="w",
                                         fill=FADE, font=mono(10), text="")
+        # a waiting decision and work under way, in ink: neither is a fault
+        self.decision_text = c.create_text(PX0 + 30, 96 + self.head_ls * 3 // 2, anchor="w",
+                                           fill=INK, font=mono(10), text="")
+        self.project_text = c.create_text(PX0 + 30, 96 + self.head_ls * 5 // 2, anchor="w",
+                                          fill=FADE, font=mono(10), text="")
         self.p_body = c.create_text(PX0 + 30, body_y, anchor="nw", fill=INK, font=mono(11),
                                     text="", width=PX1 - PX0 - 50, justify="left")
         c.create_line(PX0 + 30, H - 208, PX1 - 24, H - 208, fill=FADE)
@@ -512,8 +517,15 @@ class Machine:
             "NET %+.2f      LINES %d/%d\n"
             "CALLERS %d      REFUSED %d") % (
             net, working_lines, lines, served, turned))
-        c.coords(self.fault_text, PX0 + 30 + (len(first) + 3) * self.head_adv,
-                 96 + self.head_ls // 2)
+        side = PX0 + 30 + (len(first) + 3) * self.head_adv
+        c.coords(self.fault_text, side, 96 + self.head_ls // 2)
+        c.coords(self.decision_text, side, 96 + self.head_ls * 3 // 2)
+        c.coords(self.project_text, side, 96 + self.head_ls * 5 // 2)
+        inc, proj = s.get("incident"), s.get("project")
+        c.itemconfigure(self.decision_text, text="DECISION WAITING" if inc else "")
+        c.itemconfigure(self.project_text, text=(
+            "WORKS %d%%" % int(100 * (proj["total"] - proj["left"]) / max(1, proj["total"]))
+            if proj else ""))
 
         room = self.body_room
         rows = list(self.log)
@@ -534,6 +546,8 @@ class Machine:
         else:
             waiting = sum(1 for o in s.get("offers") or [] if o.get("state") == "offered")
             body = ["N O   C O M M A N D   Y E T", ""]
+            if s.get("incident"):
+                body += self.wrap("A DECISION IS WAITING: TYPE INCIDENT.")
             if waiting:
                 body += self.wrap("A TELEX IS WAITING ON THE TELEPRINTER: TYPE OFFERS.")
             body += self.wrap("TYPE HELP FOR THE MANUAL, OR STATUS FOR THE SYSTEM REPORT.")

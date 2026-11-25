@@ -68,6 +68,8 @@ class World:
         self.lesson_next = len(C.LESSONS)   # index of the next teaching offer; only
                                             # a brand-new world starts at zero
         self.run = self.new_run()  # this run's record, printed if it ends in liquidation
+        self.project = None        # {"name", "left", "total", "while", "then"}: one at a time
+        self.incident = None       # {"key", "left"}: a question waiting for the operator
         self.statement = ""        # the last final statement
         self.subs = int(self.demand)      # after the tycoon fields, demand reads them
 
@@ -169,6 +171,133 @@ class World:
         for k in self.RUN_KEYS:
             self.put("run:" + k, self.run[k])
 
+    # -- long projects and incidents --------------------------------------------
+    def save_pending(self):
+        if self.db is None:
+            return
+        for kind, obj in (("project", self.project), ("incident", self.incident)):
+            if obj is None:
+                self.db.execute("DELETE FROM pending WHERE kind=?", (kind,))
+            else:
+                self.db.execute("INSERT OR REPLACE INTO pending (kind, data) VALUES (?,?)",
+                                (kind, json.dumps(obj)))
+
+    def load_pending(self):
+        if self.db is None:
+            return
+        for kind, data in self.db.execute("SELECT kind, data FROM pending"):
+            obj = json.loads(data)
+            if kind == "project":
+                self.project = obj
+            elif kind == "incident" and any(i["key"] == obj["key"] for i in C.INCIDENTS):
+                self.incident = obj
+
+    def start_project(self, name, ticks, while_, then):
+        self.project = {"name": name, "left": int(ticks), "total": int(ticks),
+                        "while": dict(while_ or {}), "then": then}
+        self.save_pending()
+        self.journal("%s BEGAN: %s." % (name, span(ticks)), "project", ticks)
+
+    def advance_project(self):
+        if not self.project:
+            return
+        self.project["left"] -= 1
+        if self.project["left"] > 0:
+            if self.project["left"] % 10 == 0:
+                self.save_pending()
+            return
+        p, self.project = self.project, None
+        then = p.get("then") or {}
+        if "site" in then:
+            self.site = int(then["site"])
+            self.put("site", self.site)
+        if "upgrade" in then:
+            self.owned.add(then["upgrade"])
+            if self.db is not None:
+                self.db.execute("INSERT OR REPLACE INTO upgrade (name, n) VALUES (?,1)",
+                                ("up:" + then["upgrade"],))
+        if then.get("mod"):
+            self.add_mod(*then["mod"])
+        self.save_pending()
+        msg = "%s FINISHED." % p["name"]
+        self.queue.append(msg)
+        self.journal(msg, "project", p["total"])
+
+    def incident_def(self):
+        return next(i for i in C.INCIDENTS if i["key"] == self.incident["key"])
+
+    def roll_incident(self, rng):
+        if self.incident or self.lesson_next < len(C.LESSONS):
+            return
+        if any(c.get("lesson") for c in self.contracts):
+            return                         # let the teaching offers finish first
+        last = getattr(self, "last_incident", None)
+        pool = [i for i in C.INCIDENTS if i["key"] != last] or C.INCIDENTS
+        inc = rng.choice(pool)
+        self.incident = {"key": inc["key"], "left": inc["ticks"]}
+        self.last_incident = inc["key"]
+        self.save_pending()
+        self.queue.append("DECISION WAITING: %s. TYPE INCIDENT." % inc["title"])
+        self.journal("DECISION WAITING: %s." % inc["title"], "incident", inc["ticks"])
+
+    def decide(self, word, by_default=False):
+        """Take one of the incident's choices. Returns (ok, message)."""
+        inc = self.incident_def()
+        word = word.upper()
+        choices = inc["choices"]
+        if word.isdigit() and 1 <= int(word) <= len(choices):
+            word = choices[int(word) - 1][0]
+        match = [c for c in choices if c[0] == word]
+        if not match:
+            return False, "THE CHOICES ARE %s." % ", ".join(c[0] for c in choices)
+        _w, _desc, out = match[0]
+        cost = -out.get("money", 0.0)
+        if cost > 0 and self.money < cost and not by_default:
+            return False, "INSUFFICIENT FUNDS: THAT COSTS %.2f, CASH %.2f." % (cost, self.money)
+        if out.get("project") and self.project:
+            return False, ("THE ENGINEERS ARE BUSY WITH %s. CHOOSE SOMETHING ELSE, OR "
+                           "WAIT FOR THEM." % self.project["name"])
+        self.money += out.get("money", 0.0)
+        self.rep = max(0.0, min(20.0, self.rep + out.get("rep", 0.0)))
+        if out.get("mod"):
+            self.add_mod(*out["mod"])
+        if out.get("fault"):
+            self.break_unit(out["fault"])
+        if out.get("project"):
+            name, ticks, while_, then_mod = out["project"]
+            self.start_project(name, ticks, while_, {"mod": then_mod} if then_mod else {})
+        self.incident = None
+        self.save_pending()
+        say = ("NOBODY ANSWERED. " if by_default else "") + out.get("say", "DONE.")
+        self.queue.append(say)
+        self.journal("%s: %s" % (inc["title"], say), "incident" if by_default else "op")
+        return True, say
+
+    def advance_incident(self, rng):
+        b = C.BALANCE
+        if self.incident:
+            self.incident["left"] -= 1
+            if self.incident["left"] <= 0:
+                self.decide(self.incident_def()["default"], by_default=True)
+            elif self.incident["left"] % 10 == 0:
+                self.save_pending()
+        elif self.ticks % C.INCIDENT_EVERY == 0 and rng.random() < C.INCIDENT_CHANCE:
+            self.roll_incident(rng)
+
+    def break_unit(self, kind):
+        """Break one working unit of this kind, never the last one."""
+        dead = {f["n"] for f in self.faults_of(kind)}
+        total = self.lines if kind == "line" else self.cores
+        working = [i for i in range(1, total + 1) if i not in dead]
+        if len(working) < 2:
+            return None
+        n = working[-1]
+        before = self.net
+        self.add_fault(kind, n)
+        self.journal("FAULT: %s %d DOWN" % (kind.upper(), n), "fault", before)
+        self.run["faults"] += 1
+        return n
+
     # -- the first offers teach the game ---------------------------------------
     def teach(self):
         """Issue the next teaching offer when the last one is settled, and pay
@@ -228,12 +357,17 @@ class World:
         if not pool:
             return
         name, ticks, effects, _weight, good = rng.choice(pool)
-        self.mods.append({"name": name, "ticks_left": ticks,
-                          "effects": effects, "good": good})
+        self.add_mod(name, ticks, effects, good)
         self.journal(name, "good" if good else "bad", ticks)
         self.queue.append(("GOOD NEWS: " if good else "BAD NEWS: ") + name
                           + " - " + ", ".join("%s %+.2f" % (k, v) for k, v in effects.items())
                           + " FOR %d TICKS" % ticks)
+
+    def add_mod(self, name, ticks, effects, good):
+        """Put a buff or debuff in force; the same name again restarts it."""
+        self.mods = [m for m in self.mods if m["name"] != name]
+        self.mods.append({"name": name, "ticks_left": ticks,
+                          "effects": dict(effects), "good": good})
         if self.db is not None:
             self.db.execute("INSERT OR REPLACE INTO mod (name, ticks_left, effects, good) "
                             "VALUES (?,?,?,?)",
@@ -332,6 +466,9 @@ class World:
         self.record = 0
         self.lesson_next = len(C.LESSONS)     # a seller knows the trade
         self.run = self.new_run()
+        self.project = None
+        self.incident = None
+        self.save_pending()
         self.mark_seen()
         self.subs = int(self.demand)
         self.queue.append("A NEW MACHINE ARRIVES ON MONDAY MORNING.")
@@ -445,6 +582,10 @@ class World:
             sources.append(C.UPGRADES[name]["effects"])
         for m in self.mods:
             sources.append(m["effects"])
+        if self.project:
+            sources.append(self.project["while"])
+        if self.incident:
+            sources.append(self.incident_def()["while"])
         if self.standing:
             worth = self.standing ** 0.6
             sources.append({"rate_mult": 1.0 + 0.06 * worth,
@@ -604,6 +745,8 @@ class World:
         if self.ticks % b["mod_every"] == 0 and rng.random() < b["mod_chance"]:
             self.roll_mod(rng)
         self.expire_mods()
+        self.advance_project()
+        self.advance_incident(rng)
 
         self.earned += self.revenue
         self.run["earned"] += self.revenue
@@ -1203,6 +1346,39 @@ def r_offers(w):
     return "\r\n".join(out) + "\r\n"
 
 
+def r_incident(w):
+    if not w.incident:
+        return "\r\n  NOTHING IS WAITING FOR A DECISION.\r\n\r\n"
+    inc = w.incident_def()
+    out = [""] + fold("  ", "DECISION: " + inc["title"] + ".")
+    out.append("  " + "-" * (REPORT_WIDTH - 2))
+    out += fold("  ", inc["text"])
+    out.append("")
+    for i, (word, desc, _o) in enumerate(inc["choices"], 1):
+        out += fold("  %d  %-10s " % (i, word), desc)
+    out.append("")
+    out += fold("  ", "DECIDE <WORD>. LEFT UNANSWERED, IN %s IT IS %s." % (
+        short(w.incident["left"]), inc["default"]))
+    out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
+def r_project(w):
+    if not w.project:
+        return "\r\n  THE ENGINEERS ARE FREE. NOTHING IS UNDER WAY.\r\n\r\n"
+    p = w.project
+    done = p["total"] - p["left"]
+    bar = int(30 * done / max(1, p["total"]))
+    out = ["", "  " + p["name"], "  " + "-" * (REPORT_WIDTH - 2),
+           "  [%s%s]  %d OF %d" % ("#" * bar, "." * (30 - bar), done, p["total"]),
+           "  %s LEFT" % short(p["left"]), ""]
+    if p["while"].get("capacity_mult") is not None:
+        out += fold("  ", "MEANWHILE THE MACHINE RUNS AT %d%% OF CAPACITY."
+                    % int(100 * p["while"]["capacity_mult"]))
+        out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
 def lesson_hint(w, c):
     lesson = c.get("lesson") or ""
     L = next((x for x in C.LESSONS if x["teach"] == lesson.split(":")[0]), None)
@@ -1428,18 +1604,22 @@ def do_buy_upgrade(w, name):
     key = name.upper()
     if key in w.owned:
         return False, "WE ALREADY HAVE %s." % key
+    if w.project and (w.project.get("then") or {}).get("upgrade") == key:
+        return False, "%s IS BEING FITTED NOW." % key
     info = C.UPGRADES.get(key)
     if info is None:
         return False, ("WE DO NOT SELL %s. TYPE UPGRADES FOR THE CATALOGUE." % name.upper())
+    if w.project:
+        return False, ("THE ENGINEERS ARE BUSY WITH %s (%d TICKS LEFT). ONE JOB AT A TIME."
+                       % (w.project["name"], w.project["left"]))
     if w.money < info["price"]:
         return False, ("INSUFFICIENT FUNDS: %s COSTS %.2f, CASH %.2f."
                        % (key, info["price"], w.money))
     w.money -= info["price"]
-    w.owned.add(key)
-    if w.db is not None:
-        w.db.execute("INSERT OR REPLACE INTO upgrade (name, n) VALUES (?,1)", ("up:" + key,))
     w.journal("BOUGHT UPGRADE %s FOR %.2f" % (key, info["price"]))
-    return True, "%s INSTALLED. %s" % (key, info["desc"])
+    w.start_project("FITTING " + key, C.INSTALL_TICKS, C.INSTALL_WHILE, {"upgrade": key})
+    return True, ("%s ORDERED. THE ENGINEERS NEED %d TICKS TO FIT IT, WITH A PANEL "
+                  "OFF MEANWHILE. %s" % (key, C.INSTALL_TICKS, info["desc"]))
 
 
 def do_move(w, args):
@@ -1456,16 +1636,24 @@ def do_move(w, args):
     if idx < w.site:
         return False, "WE CANNOT GO BACKWARDS TO A SMALLER ROOM."
     name, _base_price, ceiling, base_cost = C.LOCATIONS[idx]
+    if w.project:
+        if (w.project.get("then") or {}).get("site") is not None:
+            return False, "WE ARE ALREADY MOVING: %d TICKS LEFT." % w.project["left"]
+        return False, ("THE ENGINEERS ARE BUSY WITH %s (%d TICKS LEFT). MOVE WHEN THEY "
+                       "ARE DONE." % (w.project["name"], w.project["left"]))
     price = w.site_price(idx)
     if w.money < price:
         return False, ("INSUFFICIENT FUNDS: MOVING TO %s COSTS %.2f, CASH %.2f."
                        % (name, price, w.money))
     w.money -= price
-    w.site = idx
-    w.put("site", idx)
-    w.journal("MOVED TO %s FOR %.2f" % (name, price))
-    return True, ("MOVED TO %s. THE MARKET HERE IS %d CALLERS WIDE, RENT %.2f/TICK."
-                  % (name, ceiling, base_cost))
+    w.journal("PAID %.2f TO MOVE TO %s" % (price, name))
+    w.start_project("MOVE TO " + name, C.MOVE_TICKS, C.MOVE_WHILE, {"site": idx})
+    msg = ("PAID %.2f. THE MACHINE GOES IN THE VAN NOW AND IS OFF FOR %d TICKS (%s). "
+           "AT %s THE MARKET IS %d CALLERS WIDE, RENT %.2f/TICK."
+           % (price, C.MOVE_TICKS, span(C.MOVE_TICKS), name, ceiling, base_cost))
+    if w.active():
+        msg += " LIVE JOBS WILL GO SHORT WHILE WE ARE OFF."
+    return True, msg
 
 
 def do_prestige(w):
@@ -1860,6 +2048,20 @@ async def run_command(world, rng, lock, line, peer=None):
         world.save()
     elif cmd == "LOG":
         out = r_log(world)
+    elif cmd in ("INCIDENT", "DECISION", "QUESTION"):
+        out = r_incident(world)
+    elif cmd in ("DECIDE", "ANSWER", "CHOOSE"):
+        if not world.incident:
+            out = "\r\n  ERR: NOTHING IS WAITING FOR A DECISION.\r\n\r\n"
+        elif len(parts) < 2:
+            out = "\r\n  ERR: DECIDE WHAT? TYPE INCIDENT FOR THE CHOICES.\r\n\r\n"
+        else:
+            async with lock:
+                ok, msg = world.decide(parts[1])
+                world.save()
+            out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+    elif cmd in ("PROJECT", "PROJECTS", "WORKS"):
+        out = r_project(world)
     elif cmd in ("STATEMENT", "RECORD"):
         out = "\r\n" + (world.statement or "  NO FINAL STATEMENT: WE HAVE NEVER BEEN CUT OFF.\r\n") + "\r\n"
     elif cmd in ("AWAY", "REPORT", "OVERNIGHT"):
@@ -2008,6 +2210,11 @@ def snapshot(world):
         "history": [(t, round(m, 1), round(n, 3)) for t, m, n in world.history[-180:]],
         "news": world.queue[-14:],
         "tick_seconds": world.tick_seconds,
+        "project": ({"name": world.project["name"], "left": world.project["left"],
+                     "total": world.project["total"]} if world.project else None),
+        "incident": ({"title": world.incident_def()["title"], "left": world.incident["left"],
+                      "choices": [c[0] for c in world.incident_def()["choices"]]}
+                     if world.incident else None),
         # the row id of the last final statement: a front end that sees it
         # change knows the exchange has just cut us off
         "statement": world.db.execute("SELECT COALESCE(MAX(id), 0) FROM log "
@@ -2185,6 +2392,7 @@ async def serve(port, db_path, interval, web_port=0):
             id INTEGER PRIMARY KEY, company TEXT, work TEXT, want INTEGER,
             duration INTEGER, ticks_left INTEGER, fee REAL, penalty REAL,
             state TEXT, breached INTEGER)""")
+        db.execute("CREATE TABLE IF NOT EXISTS pending(kind TEXT PRIMARY KEY, data TEXT)")
         try:                      # teaching offers; saves from before lack it
             db.execute("ALTER TABLE contract ADD COLUMN lesson TEXT")
         except sqlite3.OperationalError:
@@ -2195,6 +2403,7 @@ async def serve(port, db_path, interval, web_port=0):
     world.load_faults()
     world.load_upgrades()
     world.load_contracts()
+    world.load_pending()
     if interval:                 # only an explicit --tick overrides the saved rate
         world.tick_seconds = interval
     rng = random.Random()
