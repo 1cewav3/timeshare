@@ -514,8 +514,11 @@ class Machine:
                                             % (cut, "" if cut == 1 else "S")]
             body = shown
         else:
-            body = ["N O   C O M M A N D   Y E T", "",
-                    "TYPE HELP FOR THE MANUAL, OR STATUS FOR THE SYSTEM REPORT."]
+            waiting = sum(1 for o in s.get("offers") or [] if o.get("state") == "offered")
+            body = ["N O   C O M M A N D   Y E T", ""]
+            if waiting:
+                body += self.wrap("A TELEX IS WAITING ON THE TELEPRINTER: TYPE OFFERS.")
+            body += self.wrap("TYPE HELP FOR THE MANUAL, OR STATUS FOR THE SYSTEM REPORT.")
         c.itemconfigure(self.p_body, text="\n".join(body))
 
         if faults:

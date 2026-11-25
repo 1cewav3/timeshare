@@ -281,3 +281,35 @@ MODS = [
     ("CHEAP COMPONENTS", 300, {"repair_mult": 0.5}, 2, True),
     ("UNION TROUBLE", 260, {"cost_mult": 1.25}, 2, False),
 ]
+
+# ---- the first offers teach the game ----------------------------------------
+# A fresh world (not an old save, not after PRESTIGE) gets these one at a time,
+# in order. Each is a grant with a lesson attached: the fee lands whether the
+# player does the thing, turns it down, or ignores it until it finishes, so a
+# player who already knows the game loses nothing by skipping them.
+#   teach   accept  an ordinary small job
+#           lines   wants `extra` more callers than we can carry when offered,
+#                   so ACCEPT's own refusal points at BUY LINES / BUY CORES
+#           repair  breaks a working line; paid once that line is back up
+#           close   a long job meant to be called in early with CLOSE
+#   hint    printed under the offer; {id} {want} {capacity} {line} {fee} fill in
+LESSONS = [
+    {"teach": "accept", "company": "THE BOROUGH COUNCIL", "work": "TRIAL RUN",
+     "want": 3, "duration": 60, "fee": 25.0,
+     "hint": "A TRIAL. ACCEPT {id} AND KEEP {want} CALLERS ON FOR AN HOUR."},
+    {"teach": "lines", "company": "NORTHFIELD DAIRY", "work": "DELIVERY SCHEDULE",
+     "extra": 4, "duration": 120, "fee": 60.0,
+     "hint": "WE CARRY {capacity}, THEY WANT {want}. A LINE CARRIES ONE CALLER "
+             "AND A MODULE FEEDS EIGHT LINES: BUY LINES, AND A MODULE WHEN THE "
+             "LINES OUTRUN IT."},
+    {"teach": "repair", "company": "THE TELEPHONE PEOPLE", "work": "CALL-OUT REFUND",
+     "fee": 15.0,
+     "hint": "LINE {line} HAS GONE DEAD. REPAIR LINE {line} AND THEY REFUND "
+             "THE CALL-OUT."},
+    {"teach": "close", "company": "CROWN MILLS", "work": "STOCK VALUATION",
+     "want": 3, "duration": 600, "fee": 40.0,
+     "hint": "A LONG JOB. ACCEPT {id}, THEN CLOSE {id} WHENEVER YOU LIKE: "
+             "THE GRANT IS PAID IN FULL."},
+]
+LESSON_GRANT = "A GRANT: {fee:.0f} PAID WHETHER WE TAKE IT OR NOT."
+LESSON_PAID = "{company}: GRANT OF {fee:.0f} PAID."

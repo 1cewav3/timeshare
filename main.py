@@ -65,6 +65,8 @@ class World:
         self.record = 0            # most callers ever served at once
         self.seen = {}             # where the last operator left off, see mark_seen
         self.last_report = ""      # the away report printed at the last login
+        self.lesson_next = len(C.LESSONS)   # index of the next teaching offer; only
+                                            # a brand-new world starts at zero
         self.subs = int(self.demand)      # after the tycoon fields, demand reads them
 
     # -- faults (the only thing in the world that breaks) -------------------
@@ -93,10 +95,10 @@ class World:
             return
         rows = self.db.execute(
             "SELECT id, company, work, want, duration, ticks_left, fee, penalty, "
-            "state, breached FROM contract ORDER BY id").fetchall()
+            "state, breached, lesson FROM contract ORDER BY id").fetchall()
         self.contracts = [dict(zip(("id", "company", "work", "want", "duration",
                                     "ticks_left", "fee", "penalty", "state",
-                                    "breached"), r)) for r in rows]
+                                    "breached", "lesson"), r)) for r in rows]
         self.next_contract_id = (max((c["id"] for c in self.contracts), default=0) + 1)
 
     def save_contract(self, c):
@@ -104,11 +106,12 @@ class World:
             return
         self.db.execute(
             "INSERT INTO contract (id, company, work, want, duration, ticks_left, fee, "
-            "penalty, state, breached) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "penalty, state, breached, lesson) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET ticks_left=excluded.ticks_left, "
             "state=excluded.state, breached=excluded.breached",
             (c["id"], c["company"], c["work"], c["want"], c["duration"],
-             c["ticks_left"], c["fee"], c["penalty"], c["state"], c["breached"]))
+             c["ticks_left"], c["fee"], c["penalty"], c["state"], c["breached"],
+             c.get("lesson")))
 
     def drop_contract(self, cid):
         self.contracts = [c for c in self.contracts if c["id"] != cid]
@@ -143,6 +146,52 @@ class World:
         self.queue.append(C.CONTRACT_OFFER % (company, work, want, duration,
                                               fee, penalty, c["id"], c["id"]))
         self.journal("%s|%s|%d|%d" % (company, work, want, c["id"]), "offer", fee)
+
+    # -- the first offers teach the game ---------------------------------------
+    def teach(self):
+        """Issue the next teaching offer when the last one is settled, and pay
+        a repair lesson as soon as its line is back."""
+        for c in list(self.contracts):
+            lesson = c.get("lesson") or ""
+            if lesson.startswith("repair:"):
+                n = int(lesson.split(":")[1])
+                if not any(f["kind"] == "line" and f["n"] == n for f in self.faults):
+                    self.pay_lesson(c)
+        if self.lesson_next >= len(C.LESSONS):
+            return
+        if any(c.get("lesson") for c in self.contracts):
+            return
+        L = C.LESSONS[self.lesson_next]
+        kind, want, lesson = L["teach"], L.get("want", 0), L["teach"]
+        if kind == "lines":
+            want = self.capacity + L["extra"]
+        if kind == "repair":
+            dead = {f["n"] for f in self.faults_of("line")}
+            working = [i for i in range(1, self.lines + 1) if i not in dead]
+            if len(working) < 2:
+                return                     # never break the last line; ask later
+            n = working[-1]
+            self.add_fault("line", n)
+            lesson = "repair:%d" % n
+        c = {"id": self.next_contract_id, "company": L["company"], "work": L["work"],
+             "want": want, "duration": L.get("duration", 0),
+             "ticks_left": L.get("duration", 0), "fee": L["fee"], "penalty": 0.0,
+             "state": "offered", "breached": 0, "lesson": lesson}
+        self.next_contract_id += 1
+        self.contracts.append(c)
+        self.save_contract(c)
+        self.lesson_next += 1
+        self.put("lesson", self.lesson_next)
+        self.queue.append("TELEX FROM %s: %s" % (c["company"], lesson_hint(self, c)))
+        self.journal("TELEX: %s. %s" % (c["company"], lesson_hint(self, c)), "lesson", c["fee"])
+
+    def pay_lesson(self, c):
+        self.money += c["fee"]
+        msg = C.LESSON_PAID.format(company=c["company"], fee=c["fee"])
+        self.queue.append(msg)
+        self.journal(msg, "lesson", c["fee"])
+        self.drop_contract(c["id"])
+        return msg
 
     def offer_slots(self):
         return [c for c in self.contracts if c["state"] in ("offered", "active")]
@@ -203,6 +252,8 @@ class World:
         self.prestiges = int(row[0]) if row else 0
         row = self.db.execute("SELECT n FROM upgrade WHERE name='bodges'").fetchone()
         self.bodges = int(row[0]) if row else 0
+        row = self.db.execute("SELECT n FROM upgrade WHERE name='lesson'").fetchone()
+        self.lesson_next = int(row[0]) if row else len(C.LESSONS)
         row = self.db.execute("SELECT n FROM upgrade WHERE name='record'").fetchone()
         # an old save has no record: start from today, not from zero
         self.record = int(row[0]) if row else min(self.subs, self.capacity)
@@ -256,6 +307,7 @@ class World:
             self.save()
         self.prestiges = saved_prestiges
         self.record = 0
+        self.lesson_next = len(C.LESSONS)     # a seller knows the trade
         self.mark_seen()
         self.subs = int(self.demand)
         self.queue.append("A NEW MACHINE ARRIVES ON MONDAY MORNING.")
@@ -282,6 +334,8 @@ class World:
         ).fetchone()
         if row is None:
             self.save()
+            self.lesson_next = 0           # a brand-new world: teach it
+            self.put("lesson", 0)
             return
         (self.money, self.cores, self.lines, self.subs, self.rep,
          self.ticks, self.last_tick, self.tier) = row[:8]
@@ -543,6 +597,7 @@ class World:
         if self.ticks % b["contract_every"] == 0 and rng.random() < b["contract_roll_chance"]:
             self.offer_contract(rng)
         self.settle_contracts()
+        self.teach()
 
         # a new high for callers served at once is worth telling someone about
         if self.served > self.record:
@@ -573,6 +628,9 @@ class World:
                 c["breached"] += 1
             if c["ticks_left"] <= 0:
                 allowed = c["duration"] * b["contract_breach_tolerance"]
+                if c.get("lesson"):
+                    self.pay_lesson(c)         # a grant: paid however it went
+                    continue
                 if c["breached"] > allowed:
                     self.money -= c["penalty"]
                     self.rep = max(0.0, self.rep - 1.0)
@@ -1060,11 +1118,17 @@ def r_offers(w):
         state = "LIVE" if c["state"] == "active" else "OFFER"
         out.append("  %2d  %-22s %-18s %s" % (c["id"], c["company"], c["work"], state))
         hold = "%d callers" % c["want"]
-        out.append("      needs %-12s for %d ticks   fee %.0f   penalty %.0f"
-                   % (hold, c["duration"], c["fee"], c["penalty"]))
+        if not c.get("lesson"):
+            out.append("      needs %-12s for %d ticks   fee %.0f   penalty %.0f"
+                       % (hold, c["duration"], c["fee"], c["penalty"]))
+        elif c["duration"]:                    # a grant: no penalty to print
+            out.append("      needs %-12s for %d ticks" % (hold, c["duration"]))
         if state == "LIVE":
             out.append("      %d ticks left, short on %d of them"
                        % (c["ticks_left"], c["breached"]))
+        if c.get("lesson"):
+            out.append("      " + C.LESSON_GRANT.format(fee=c["fee"]))
+            out.append("      " + lesson_hint(w, c))
     live = w.active()
     out.append("")
     out.append("  LIVE JOBS %d OF %d        ACCEPT n   take the work      DROP n   turn it down"
@@ -1073,6 +1137,16 @@ def r_offers(w):
         out.append("  CLOSE n    call a job in early: paid for the term served, plus the bonus")
     out.append("")
     return "\r\n".join(out) + "\r\n"
+
+
+def lesson_hint(w, c):
+    lesson = c.get("lesson") or ""
+    L = next((x for x in C.LESSONS if x["teach"] == lesson.split(":")[0]), None)
+    if L is None:
+        return ""
+    return L["hint"].format(id=c["id"], want=c["want"], capacity=w.capacity,
+                            line=lesson.split(":")[1] if ":" in lesson else "",
+                            fee=c["fee"])
 
 
 def contract_line(w):
@@ -1377,6 +1451,10 @@ def do_accept(w, args):
     if not match:
         return False, "NO OFFER NUMBER %d. TYPE OFFERS." % cid
     c = match[0]
+    lesson = c.get("lesson") or ""
+    if lesson.startswith("repair:"):
+        return False, ("NOTHING TO SIGN: REPAIR LINE %s (OR BODGE IT) AND THEY PAY %.0f."
+                       % (lesson.split(":")[1], c["fee"]))
     if w.capacity < c["want"]:
         return False, ("WE CAN ONLY SERVE %d CALLERS AND THEY WANT %d. "
                        "BUY LINES OR CORES FIRST, OR TAKE THE RISK LATER."
@@ -1405,6 +1483,8 @@ def do_close(w, args):
     if not match:
         return False, "NO LIVE JOB NUMBER %d. TYPE OFFERS." % cid
     c = match[0]
+    if c.get("lesson"):
+        return True, "CALLED IN. " + w.pay_lesson(c)
     held = c["duration"] - c["ticks_left"]
     allowed = c["duration"] * C.BALANCE["contract_breach_tolerance"]
     if c["breached"] > allowed:
@@ -1436,6 +1516,9 @@ def do_drop(w, args):
     if not match:
         return False, "NO OFFER NUMBER %d." % cid
     c = match[0]
+    if c.get("lesson"):
+        return True, "%s TURNED DOWN. THEY PAY THE GRANT ANYWAY. %s" % (
+            c["company"], w.pay_lesson(c))
     w.drop_contract(cid)
     if c["state"] == "active":
         return True, "%s DROPPED. THAT WILL BE REMEMBERED." % c["company"]
@@ -1938,6 +2021,9 @@ async def handle(reader, writer, world, rng, lock):
             down = ("  %d FAULT%s DOWN: %s  (TYPE FAULTS)\r\n"
                     % (len(world.faults), "" if len(world.faults) == 1 else "S",
                        ", ".join(f["kind"].upper() + " %d" % f["n"] for f in world.faults)))
+        if world.offers():
+            down += ("  %d OFFER%s ON THE TELEPRINTER  (TYPE OFFERS)\r\n"
+                     % (len(world.offers()), "" if len(world.offers()) == 1 else "S"))
         writer.write(("\r\nWELCOME, %s. TICK %d. CASH %.2f. %d CALLERS ON SYSTEM.\r\n%s\r\n"
                       % ((name or "OPERATOR").upper()[:16], world.ticks, world.money,
                          world.subs, down)).encode())
@@ -2025,6 +2111,10 @@ async def serve(port, db_path, interval, web_port=0):
             id INTEGER PRIMARY KEY, company TEXT, work TEXT, want INTEGER,
             duration INTEGER, ticks_left INTEGER, fee REAL, penalty REAL,
             state TEXT, breached INTEGER)""")
+        try:                      # teaching offers; saves from before lack it
+            db.execute("ALTER TABLE contract ADD COLUMN lesson TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     world = World(db)
     world.load()
