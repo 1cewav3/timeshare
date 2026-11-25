@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NORTHGATE - timesharing bureau, 1979</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="head">
+  <span class="brand">NORTHGATE</span>
+  <span id="site" class="dim">room 2b</span>
+  <span id="tick" class="dim">tick 0</span>
+  <span id="cash" class="amber">0.00</span>
+  <span id="net" class="dim">0.000/tick</span>
+  <span id="won" class="good hidden">the building is yours</span>
+</header>
+
+<section class="bar topbar">
+  <span class="prompt">&gt;</span>
+  <input id="cmd" class="cmd" type="text" autocomplete="off" spellcheck="false"
+         placeholder="status   jobs   repair   offers   accept 1   hire sales   buy cooling plant   h for the list">
+  <span id="selbox" class="selbox dim">nothing selected</span>
+</section>
+
+<main>
+  <section class="left">
+    <h3>the machine <span class="dim">- capacity, throughput, what it costs to run</span></h3>
+    <div class="grid4">
+      <div class="panel stat"><span class="k">capacity</span><span id="cap" class="v">-</span><span id="capwhy" class="n dim"></span></div>
+      <div class="panel stat"><span class="k">callers</span><span id="callers" class="v">-</span><span id="queue" class="n dim"></span></div>
+      <div class="panel stat"><span class="k">revenue</span><span id="rev" class="v good">-</span><span id="outg" class="n bad">-</span></div>
+      <div class="panel stat"><span class="k">reputation</span><span id="rep" class="v">-</span><span id="trend" class="n dim"></span></div>
+    </div>
+
+    <h3>the ledger <span class="dim">- cash over the last three hours of ticks</span></h3>
+    <div class="panel"><canvas id="chart" height="120"></canvas></div>
+
+    <h3>what the console said</h3>
+    <div id="news" class="panel log"></div>
+
+    <h3>the deeds <span class="dim">- what all of this is for</span></h3>
+    <div class="panel">
+      <div class="row"><span>northgate house</span><span id="goalv" class="amber">-</span></div>
+      <div class="meter"><i id="goalfill"></i></div>
+      <div id="goalsub" class="dim small"></div>
+    </div>
+  </section>
+
+  <aside class="right">
+    <h3>staff</h3><div id="staff" class="panel"></div>
+    <h3>in force</h3><div id="mods" class="panel"></div>
+    <h3>down</h3><div id="faults" class="panel"></div>
+    <h3>on the teleprinter</h3><div id="offers" class="panel"></div>
+    <h3>installed</h3><div id="ups" class="chips"></div>
+  </aside>
+</main>
+
+<footer><p class="dim">The machine runs on its own clock - close this page and the business keeps trading.
+Commands are typed in the box at the top, exactly as on the terminal.</p></footer>
+
+<script src="app.js"></script>
+</body>
+</html>
