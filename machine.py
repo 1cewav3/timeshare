@@ -9,6 +9,7 @@ you present, and /state supplies every number drawn here. Nothing on the canvas
 is invented — if the engine does not report it, it is not shown.
 """
 import atexit
+import collections
 import hashlib
 import time
 import json
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.error
 import urllib.request
 
@@ -77,6 +79,7 @@ class Machine:
     def __init__(self, root, host, port, web):
         self.root = root
         self.note = ""
+        self.log = collections.deque(maxlen=40)   # what you typed, and what came back
         root.title("timeshare — SYS/370-145")
         root.configure(bg=BG)
         root.resizable(False, False)
@@ -143,14 +146,15 @@ class Machine:
         if not line:
             return
         if line.upper() in ("HELP", "?"):
+            self.log.append(("cmd", line))
             self.show_help(self.fetch("HELP"))     # a sheet, not a line of text
             return
-        if self.sock:
-            try:
-                self.sock.sendall((line + "\n").encode("latin-1"))
-            except OSError:
-                self.note = "the line dropped"
-            self.read_socket()
+        self.log.append(("cmd", line))
+        answer = self.fetch(line, seconds=2.0)
+        for row in answer.splitlines():
+            if row.strip():
+                self.log.append(("out", row.strip()))
+        self.read_socket()
 
     def fetch(self, command, seconds=1.5):
         """Send one command and collect the answer, for printing on paper."""
@@ -240,14 +244,16 @@ class Machine:
 
     def build(self):
         c = self.c
+        face = tkfont.Font(family="DejaVu Sans Mono", size=-11, weight="bold")
+        self.body_chars = max(28, int((PX1 - PX0 - 52) / max(1, face.measure("M"))))
         c.create_rectangle(6, 6, W - 6, H - 6, outline=RULE, fill=BG)
         for x, y in ((14, 14), (W - 14, 14), (14, H - 14), (W - 14, H - 14)):
             self.screw(x, y)
 
         c.create_text(26, 26, anchor="w", fill=STENCIL, font=mono(12),
                       text="N O R T H G A T E   C O M P U T E R   S E R V I C E S")
-        c.create_text(W / 2 + 60, 26, anchor="e", fill=STENCIL, font=mono(11),
-                      text="S Y S / 3 7 0 - 1 4 5")
+        c.create_text(W - 196, 26, anchor="e", fill=STENCIL, font=mono(11),
+                      text="SYS/370-145")
         c.create_text(W - 26, 26, anchor="e", fill=STENCIL, font=mono(11),
                       text="S E P   1 9 7 9")
         c.create_line(26, 40, W - 26, 40, fill=RULE)
@@ -411,37 +417,27 @@ class Machine:
             s.get("tick", 0), "{:,.2f}".format(s.get("cash", 0.0)), net,
             working_lines, lines, served, turned))
 
+        room = 21                     # printed lines that fit above the goal block
+        typed_rows = []
+        for kind, text in list(self.log)[-14:]:
+            row = ("› " + text) if kind == "cmd" else ("  " + text)
+            typed_rows.append(row[:self.body_chars])
+
         news = []
         for line in (s.get("news") or [])[-6:]:
             if line not in news:
                 news.append(line)
-        body = ["J O U R N A L", ""]
-        body += [n[:46] for n in news] or ["N O   T R A F F I C   Y E T"]
-        if faults:
-            body += ["", "F A U L T S", ""]
-            body += ["%s %d DOWN · REPAIR %s" % (str(x.get("kind", "?")).upper(),
-                                                 x.get("n", 0),
-                                                 "{:,.2f}".format(x.get("cost", 0)))
-                     for x in faults[:3]]
-        live = [x for x in (s.get("offers") or []) if x.get("state") == "active"]
-        if live:
-            body += ["", "C O N T R A C T S", ""]
-            body += ["%s · %d TICKS · %s" % (str(x.get("company", "?"))[:20],
-                                             x.get("left", 0),
-                                             "{:,.2f}".format(x.get("fee", 0)))
-                     for x in live[:3]]
-        owned = [str(u).lower() for u in (s.get("upgrades") or [])][:4]
-        mods = ["%s (%d)" % (str(m.get("name", "?")).lower(), m.get("left", 0))
-                for m in (s.get("mods") or [])][:3]
-        if owned or mods:
-            body += ["", "E Q U I P M E N T", ""] + owned + mods
-        staff = [str(i.get("name", "?")).title() for i in (s.get("staff") or [])][:4]
-        if staff:
-            body += ["", "S T A F F", ""] + [",  ".join(staff)]
-        room = 21                      # lines that fit above the goal block
-        if len(body) > room:
-            body = body[:room - 1] + ["… review the journal for the rest"]
-        c.itemconfigure(self.p_body, text="\n".join(body))
+        journal = [n[:self.body_chars] for n in news] or ["N O   T R A F F I C   Y E T"]
+
+        body = []
+        if typed_rows:
+            body = ["C O M M A N D S", ""]
+            keep = max(0, room - 6)          # leave room for the journal heading
+            body += typed_rows[-keep:] if keep else []
+            body += [""]
+        body += ["J O U R N A L", ""]
+        body += journal[:max(1, room - len(body))]
+        c.itemconfigure(self.p_body, text="\n".join(body[:room]))
 
         goal = s.get("goal") or {}
         gpct = max(0.0, min(100.0, float(goal.get("pct", 0))))
