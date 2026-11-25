@@ -45,6 +45,8 @@ COMMANDS
   MODE WALL       the machine runs even with nobody dialled in
   MODE SESSION    the machine only runs while someone is on
   TICK n          seconds per tick (1 to 3600), saved with the world
+  SCRAP LINE n    sell a dead unit for parts (40% of its price)
+  BODGE LINE n    repair a dead unit cheaply; each bodge adds 5% to the fault rate
   BUY BUILDING    buy the building that houses the machine (ends the game)
   OFFERS          work offered to you, with a deadline and a penalty
   ACCEPT n        take offer n (up to 3 at once)
@@ -80,6 +82,8 @@ BALANCE = {
     "price_line": 12.0,
     "price_repair_line": 10.0,
     "price_repair_module": 45.0,
+    "bodge_rate": 0.4,              # a bodge costs this share of a real repair
+    "salvage_rate": 0.4,            # a dead unit sells for this share of its price
     "price_slot": 30.0,
 
     # batch throughput: how many callers' jobs run at once

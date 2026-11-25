@@ -50,6 +50,7 @@ class World:
         self.refused_share = 0.0
         self.contracts = []        # offers and live jobs, see load_contracts
         self.overdraft_ticks = 0
+        self.bodges = 0            # cheap repairs, each one makes the plant flakier
         self.next_contract_id = 1
         self.won_tick = 0          # 0 = still renting
         self.staff = {}            # role -> {"name": str, "level": int}
@@ -194,6 +195,8 @@ class World:
         self.standing = int(row[0]) if row else 0
         row = self.db.execute("SELECT n FROM upgrade WHERE name='prestiges'").fetchone()
         self.prestiges = int(row[0]) if row else 0
+        row = self.db.execute("SELECT n FROM upgrade WHERE name='bodges'").fetchone()
+        self.bodges = int(row[0]) if row else 0
         self.owned = {r[0][3:] for r in self.db.execute(
             "SELECT name FROM upgrade WHERE name LIKE 'up:%'")}
         self.staff = {}
@@ -332,6 +335,8 @@ class World:
                     eff[k] *= v
                 else:
                     eff[k] += v
+        if self.bodges:
+            eff["fault_mult"] *= 1.0 + 0.05 * self.bodges
         return eff
 
     @property
@@ -1248,6 +1253,75 @@ def do_sell(w, args):
                   % (n, what, proceeds, w.money, w.capacity, w.slots))
 
 
+def _unit_args(w, args, verb):
+    """Shared parsing for commands that name one line or one module."""
+    if len(args) < 2:
+        return None, None, "USAGE: %s LINE n   |   %s MODULE n" % (verb, verb)
+    what = args[0].upper()
+    if what in ("LINE", "LINES"):
+        kind = "line"
+    elif what in ("MODULE", "MODULES", "CORE", "CORES"):
+        kind = "module"
+    else:
+        return None, None, "%s WHAT? LINE OR MODULE." % verb
+    try:
+        n = int(args[1])
+    except ValueError:
+        return None, None, "THE NUMBER MUST BE A WHOLE NUMBER."
+    match = [f for f in w.faults if f["kind"] == kind and f["n"] == n]
+    if not match:
+        return None, None, ("%s %d IS NOT DOWN. TYPE FAULTS TO SEE WHAT IS."
+                            % (what, n))
+    return kind, n, None
+
+
+def _drop_fault(w, kind, n):
+    w.faults = [f for f in w.faults if not (f["kind"] == kind and f["n"] == n)]
+    if w.db is not None:
+        w.db.execute("DELETE FROM fault WHERE kind=? AND n=?", (kind, n))
+
+
+def do_scrap(w, args):
+    """Sell a dead unit for parts. Returns (ok, message)."""
+    kind, n, err = _unit_args(w, args, "SCRAP")
+    if err:
+        return False, err
+    b = C.BALANCE
+    price = b["price_line"] if kind == "line" else w.hardware["price_core"]
+    proceeds = round(price * b["salvage_rate"], 2)
+    w.money += proceeds
+    _drop_fault(w, kind, n)
+    if kind == "line":
+        w.lines = max(0, w.lines - 1)
+    else:
+        w.cores = max(0, w.cores - 1)
+    w.journal("SCRAPPED %s %d FOR %.2f" % (kind.upper(), n, proceeds))
+    return True, ("%s %d STRIPPED AND SOLD FOR %.2f. CASH %.2f. CAPACITY NOW %d."
+                  % (kind.upper(), n, proceeds, w.money, w.capacity))
+
+
+def do_bodge(w, args):
+    """Bring a dead unit back cheaply. Returns (ok, message)."""
+    kind, n, err = _unit_args(w, args, "BODGE")
+    if err:
+        return False, err
+    b = C.BALANCE
+    cost = round(repair_cost(kind, w) * b["bodge_rate"], 2)
+    if w.money < cost:
+        return False, ("INSUFFICIENT FUNDS: A BODGE COSTS %.2f, CASH %.2f. "
+                       "SCRAP SOMETHING OR WAIT." % (cost, w.money))
+    w.money -= cost
+    _drop_fault(w, kind, n)
+    w.bodges += 1
+    if w.db is not None:
+        w.db.execute("INSERT INTO upgrade (name, n) VALUES ('bodges', ?) "
+                     "ON CONFLICT(name) DO UPDATE SET n=excluded.n", (w.bodges,))
+    w.journal("BODGED %s %d FOR %.2f" % (kind.upper(), n, cost))
+    return True, ("%s %d IS BACK, HELD TOGETHER WITH TAPE. COST %.2f. "
+                  "THE PLANT NOW FAULTS %.0f%% OFTEN."
+                  % (kind.upper(), n, cost, 100 * (1 + 0.05 * w.bodges) - 100))
+
+
 def do_repair(w, args):
     """Fix one fault, or everything. Returns (ok, message)."""
     if not w.faults:
@@ -1463,6 +1537,16 @@ async def run_command(world, rng, lock, line, peer=None):
     elif cmd == "SELL":
         async with lock:
             ok, msg = do_sell(world, parts[1:])
+            world.save()
+        out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+    elif cmd == "SCRAP":
+        async with lock:
+            ok, msg = do_scrap(world, parts[1:])
+            world.save()
+        out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+    elif cmd == "BODGE":
+        async with lock:
+            ok, msg = do_bodge(world, parts[1:])
             world.save()
         out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
     elif cmd == "REPAIR":
