@@ -149,7 +149,7 @@ class Machine:
         if not line:
             return
         if line.upper() in ("HELP", "?"):
-            self.log.append(("cmd", line))
+            # the manual is its own sheet; the last answer stays where it was
             self.show_help(self.fetch("HELP"))     # a sheet, not a line of text
             return
         self.log.append(("cmd", line))
