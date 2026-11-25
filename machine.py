@@ -46,7 +46,13 @@ LX0, LX1 = 16, 632            # left column
 
 
 def mono(size, bold=True):
-    return ("DejaVu Sans Mono", size, "bold" if bold else "normal")
+    """Pixel sizes, deliberately negative.
+
+    A positive size is in points, which tk multiplies by its scaling factor
+    (1.778 on this display) and blows the layout apart. Negative means pixels,
+    so the text keeps the size the coordinates were designed for.
+    """
+    return ("DejaVu Sans Mono", -size, "bold" if bold else "normal")
 
 
 class Poller(threading.Thread):
@@ -72,7 +78,6 @@ class Machine:
         self.note = ""
         root.title("timeshare — SYS/370-145")
         root.configure(bg=BG)
-        root.geometry("%dx%d" % (W, H))
         root.resizable(False, False)
 
         self.sock = None
