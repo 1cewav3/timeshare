@@ -27,7 +27,7 @@ COMMANDS
   BUY LINES n     add dial-in lines (one caller each)
   BUY CORES n     add a processing module (eight callers each)
   BUY SLOTS n     add a batch slot: one more caller's work runs at once
-  SELL LINES n    get rid of lines you cannot fill (40% back)
+  SELL LINES n    sell working lines you cannot fill (40% back)
   SELL SLOTS n    get rid of spare batch slots (40% back)
   FAULTS          what is down, how long, and what it costs to fix
   REPAIR          fix everything that is down
@@ -45,9 +45,9 @@ COMMANDS
   MODE WALL       the machine runs even with nobody dialled in
   MODE SESSION    the machine only runs while someone is on
   TICK n          seconds per tick (1 to 3600), saved with the world
-  SCRAP LINE n    sell a dead unit for parts (40% of its price)
-  BODGE LINE n    repair a dead unit cheaply; each bodge adds 5% to the fault rate
-  BUY BUILDING    buy the building that houses the machine (ends the game)
+  SCRAP LINE n    sell a dead unit for parts (20% of its price)
+  BODGE LINE n    repair a dead unit at half price; each bodge adds 5% to the fault rate
+  BUY BUILDING    buy the building and stop paying rent
   OFFERS          work offered to you, with a deadline and a penalty
   ACCEPT n        take offer n (up to 3 at once)
   CLOSE n         call a live job in early; it pays for the term you served
@@ -82,8 +82,11 @@ BALANCE = {
     "price_line": 12.0,
     "price_repair_line": 10.0,
     "price_repair_module": 45.0,
-    "bodge_rate": 0.4,              # a bodge costs this share of a real repair
-    "salvage_rate": 0.4,            # a dead unit sells for this share of its price
+    # a bodge must cost more than a working line sells for (12 x 0.4 = 4.80),
+    # or bodge-then-sell is a money machine; and a dead unit is worth less
+    # than a working one
+    "bodge_rate": 0.5,              # a bodge costs this share of a real repair
+    "salvage_rate": 0.2,            # a dead unit sells for this share of its price
     "price_slot": 30.0,
 
     # batch throughput: how many callers' jobs run at once
