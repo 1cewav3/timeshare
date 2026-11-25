@@ -1236,9 +1236,15 @@ def do_sell(w, args):
         return False, "QUANTITY OUT OF RANGE."
     rate = C.BALANCE["liquidation_rate"]
     if what in ("LINE", "LINES"):
-        if n >= w.lines:
-            return False, "WE NEED AT LEAST ONE LINE TO STAY IN BUSINESS."
+        # only working lines are sold: a dead one is worth parts, which is SCRAP
+        dead = {f["n"] for f in w.faults_of("line")}
+        working = [i for i in range(1, w.lines + 1) if i not in dead]
+        if n >= len(working):
+            return False, ("WE HAVE %d WORKING LINE%s AND NEED AT LEAST ONE. "
+                           "DEAD LINES ARE SCRAPPED, NOT SOLD: SCRAP LINE n."
+                           % (len(working), "" if len(working) == 1 else "S"))
         w.lines -= n
+        renumber_lines(w, working[-n:])
         proceeds = n * C.BALANCE["price_line"] * rate
     elif what in ("SLOT", "SLOTS"):
         spare = w.slots - C.BALANCE["start_slots"]
@@ -1253,6 +1259,17 @@ def do_sell(w, args):
     w.journal("SOLD %d %s FOR %.2f" % (n, what, proceeds))
     return True, ("%d %s DISPOSED OF FOR %.2f. CASH %.2f. CAPACITY %d, SLOTS %d."
                   % (n, what, proceeds, w.money, w.capacity, w.slots))
+
+
+def renumber_lines(w, gone):
+    """Lines run 1..lines with no gaps: close up the numbers that were removed,
+    so a dead line keeps pointing at the same physical line."""
+    for f in w.faults_of("line"):
+        f["n"] -= sum(1 for g in gone if g < f["n"])
+    if w.db is not None:
+        w.db.execute("DELETE FROM fault WHERE kind='line'")
+        for f in w.faults_of("line"):
+            w.db.execute("INSERT INTO fault (kind, n) VALUES ('line', ?)", (f["n"],))
 
 
 def _unit_args(w, args, verb):
