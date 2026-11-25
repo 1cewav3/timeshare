@@ -7,15 +7,14 @@ books positive while the machine ages and things break.
 ## run
 
 ```
-python3 main.py --port 2023 --db /tmp/demo.db
-python3 play.py                      # second terminal
-python3 main.py --port 2023 --web 2024   # browser board on :2024
-python3 panel.py 127.0.0.1 2023 2024     # the machine, drawn as a panel
-python3 machine.py 127.0.0.1 2023 2024   # the machine, as its own window
+python3 machine.py                        # starts the world and opens the window
+python3 machine.py --db /tmp/demo.db --tick 3
+python3 play.py                           # plain terminal client, same world
 ```
 
-The panel needs the board port: it reads the numbers from `/state` and keeps
-one socket session open so the game counts you as on the line.
+`machine.py` alone is enough: if no world answers on the command port it
+starts one, and closing the window stops it again. Add `--port`, `--web`,
+`--db` or `--tick` to point it at a different world.
 
 Stdlib only. No install step.
 

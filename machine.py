@@ -8,8 +8,12 @@ Two connections, each doing one job: a socket session carries commands and makes
 you present, and /state supplies every number drawn here. Nothing on the canvas
 is invented — if the engine does not report it, it is not shown.
 """
+import atexit
 import json
+import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -348,15 +352,77 @@ class Machine:
             "{:,.0f}".format(max(0.0, goal.get("price", 0) - s.get("cash", 0.0)))))
 
 
+def state_answers(web, host="127.0.0.1"):
+    try:
+        with urllib.request.urlopen("http://%s:%d/state" % (host, web), timeout=1) as r:
+            return bool(json.loads(r.read().decode()))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
+def ensure_world(host, port, web, db, tick):
+    """One launcher: if nothing is answering, start a world and own it.
+
+    Returns the child process when this script started one, else None, so the
+    window can stop it again on exit and never leaves a server behind.
+    """
+    if state_answers(web, host):
+        return None
+    if host not in ("127.0.0.1", "localhost"):
+        return None                      # a remote world is not ours to start
+    here = os.path.dirname(os.path.abspath(__file__))
+    cmd = [sys.executable, os.path.join(here, "main.py"),
+           "--port", str(port), "--web", str(web)]
+    if db:
+        cmd += ["--db", db]
+    if tick:
+        cmd += ["--tick", str(tick)]
+    child = subprocess.Popen(cmd, cwd=here, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    for _ in range(60):                  # up to twelve seconds
+        if state_answers(web, host):
+            return child
+        if child.poll() is not None:
+            return None                  # it refused to start; the window says so
+        threading.Event().wait(0.2)
+    return child
+
+
+def parse():
+    import argparse
+    ap = argparse.ArgumentParser(description="timeshare, in one window")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=2023, help="command port")
+    ap.add_argument("--web", type=int, default=2024, help="state port")
+    ap.add_argument("--db", default=None, help="save file (default: the server's own)")
+    ap.add_argument("--tick", type=int, default=None, help="seconds per tick")
+    return ap.parse_args()
+
+
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 2023
-    web = int(sys.argv[3]) if len(sys.argv) > 3 else port + 1
+    args = parse()
+    child = ensure_world(args.host, args.port, args.web, args.db, args.tick)
+
+    def stop_child():
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+
+    atexit.register(stop_child)
+
     root = tk.Tk()
-    app = Machine(root, host, port, web)
+    app = Machine(root, args.host, args.port, args.web)
     root.bind("<Escape>", lambda e: root.destroy())
-    root.mainloop()
-    app.poller.stop = True
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, lambda *_: root.destroy())   # so the world goes with the window
+    try:
+        root.mainloop()
+    finally:
+        app.poller.stop = True
+        stop_child()
 
 
 if __name__ == "__main__":
