@@ -54,6 +54,7 @@ COMMANDS
   DROP n          turn offer n down
   NEWS            console messages since you were last on
   AWAY            what happened while you were gone, again
+  STATEMENT       the final statement from the last time we went broke
   LOG             recent system journal
   BYE             drop carrier
 

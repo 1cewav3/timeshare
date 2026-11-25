@@ -223,8 +223,13 @@ class Machine:
 
     def show_help(self, text):
         """The manual, printed on a sheet of paper the length of the manual."""
-        if getattr(self, "help_win", None) is not None and self.help_win.winfo_exists():
-            self.help_win.lift()
+        self.show_sheet(text, "help_win", "operator's manual — SYS/370-145",
+                        "N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L")
+
+    def show_sheet(self, text, slot, title, heading):
+        """A second sheet of paper in its own window, sized to its text."""
+        if getattr(self, slot, None) is not None and getattr(self, slot).winfo_exists():
+            getattr(self, slot).lift()
             return
         text = (text or "the machine sent nothing back").replace("\r\n", "\n").replace("\r", "\n")
         lines = text.count("\n") + 1
@@ -233,14 +238,13 @@ class Machine:
         chh = 46 + lines * pitch + 44     # measured pitch, plus air for the footer
         top = max(0, min(70, self.root.winfo_screenheight() - chh - 40))
         win = tk.Toplevel(self.root)
-        win.title("operator's manual — SYS/370-145")
+        win.title(title)
         win.configure(bg=PAPER)
         win.resizable(False, False)
         win.geometry("%dx%d+90+%d" % (cw, chh, top))
         c = tk.Canvas(win, width=cw, height=chh, bg=PAPER, highlightthickness=0)
         c.pack()
-        c.create_text(30, 24, anchor="w", fill=FADE, font=mono(10),
-                      text="N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L")
+        c.create_text(30, 24, anchor="w", fill=FADE, font=mono(10), text=heading)
         body = c.create_text(30, 46, anchor="nw", fill=INK, font=mono(11), justify="left",
                              width=cw - 58,
                              text=text or "the machine sent nothing back")
@@ -251,7 +255,7 @@ class Machine:
         c.create_text(30, chh - 20, anchor="w", fill=FADE, font=mono(9),
                       text="ESC closes this sheet")
         win.bind("<Escape>", lambda e: win.destroy())
-        self.help_win = win
+        setattr(self, slot, win)
 
     def read_socket(self):
         if not self.sock:
@@ -413,8 +417,22 @@ class Machine:
     def refresh(self):
         if self.poller.state:
             self.paint(self.poller.state)
+            self.watch_statement(self.poller.state)
         self.c.itemconfigure(self.note_text, text=self.note[-140:])
         self.root.after(200, self.refresh)
+
+    def watch_statement(self, s):
+        """Going broke is an ending: print the final statement on its own sheet
+        the moment it happens. One that was printed before this window opened
+        is left to the away report."""
+        sid = int(s.get("statement", 0))
+        if getattr(self, "statement_seen", None) is None:
+            self.statement_seen = sid
+        elif sid > self.statement_seen:
+            self.statement_seen = sid
+            self.show_sheet(self.fetch("STATEMENT"), "statement_win",
+                            "final statement — SYS/370-145",
+                            "N O R T H G A T E   ·   F I N A L   S T A T E M E N T")
 
     def paint(self, s):
         c = self.c

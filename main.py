@@ -67,6 +67,8 @@ class World:
         self.last_report = ""      # the away report printed at the last login
         self.lesson_next = len(C.LESSONS)   # index of the next teaching offer; only
                                             # a brand-new world starts at zero
+        self.run = self.new_run()  # this run's record, printed if it ends in liquidation
+        self.statement = ""        # the last final statement
         self.subs = int(self.demand)      # after the tycoon fields, demand reads them
 
     # -- faults (the only thing in the world that breaks) -------------------
@@ -146,6 +148,26 @@ class World:
         self.queue.append(C.CONTRACT_OFFER % (company, work, want, duration,
                                               fee, penalty, c["id"], c["id"]))
         self.journal("%s|%s|%d|%d" % (company, work, want, c["id"]), "offer", fee)
+
+    # -- the run's record -------------------------------------------------------
+    RUN_KEYS = ("start", "peak", "peak_tick", "faults", "met", "short", "earned")
+
+    def new_run(self):
+        return {"start": self.ticks, "peak": self.money, "peak_tick": self.ticks,
+                "faults": 0, "met": 0, "short": 0, "earned": 0.0}
+
+    def load_run(self):
+        self.run = self.new_run()
+        for k, v in self.db.execute("SELECT name, n FROM upgrade WHERE name LIKE 'run:%'"):
+            if k[4:] in self.run:
+                self.run[k[4:]] = v
+        row = self.db.execute("SELECT line FROM log WHERE kind='statement' "
+                              "ORDER BY id DESC LIMIT 1").fetchone()
+        self.statement = row[0] if row else ""
+
+    def save_run(self):
+        for k in self.RUN_KEYS:
+            self.put("run:" + k, self.run[k])
 
     # -- the first offers teach the game ---------------------------------------
     def teach(self):
@@ -252,6 +274,7 @@ class World:
         self.prestiges = int(row[0]) if row else 0
         row = self.db.execute("SELECT n FROM upgrade WHERE name='bodges'").fetchone()
         self.bodges = int(row[0]) if row else 0
+        self.load_run()
         row = self.db.execute("SELECT n FROM upgrade WHERE name='lesson'").fetchone()
         self.lesson_next = int(row[0]) if row else len(C.LESSONS)
         row = self.db.execute("SELECT n FROM upgrade WHERE name='record'").fetchone()
@@ -308,6 +331,7 @@ class World:
         self.prestiges = saved_prestiges
         self.record = 0
         self.lesson_next = len(C.LESSONS)     # a seller knows the trade
+        self.run = self.new_run()
         self.mark_seen()
         self.subs = int(self.demand)
         self.queue.append("A NEW MACHINE ARRIVES ON MONDAY MORNING.")
@@ -377,6 +401,7 @@ class World:
              self.ticks, self.last_tick, self.tier, json.dumps(self.queue), self.mode,
              self.tick_seconds),
         )
+        self.save_run()
 
     def journal(self, line, kind="op", val=None):
         """One row per thing that happened, stamped with the tick, the cash and
@@ -581,6 +606,9 @@ class World:
         self.expire_mods()
 
         self.earned += self.revenue
+        self.run["earned"] += self.revenue
+        if self.money > self.run["peak"]:
+            self.run["peak"], self.run["peak_tick"] = self.money, self.ticks
         self.history.append((self.ticks, self.money, self.net))
         del self.history[:-360]
 
@@ -632,6 +660,7 @@ class World:
                     self.pay_lesson(c)         # a grant: paid however it went
                     continue
                 if c["breached"] > allowed:
+                    self.run["short"] += 1
                     self.money -= c["penalty"]
                     self.rep = max(0.0, self.rep - 1.0)
                     self.queue.append("%s: WE SHORTED THEM ON %d OF %d TICKS. PENALTY %.0f CHARGED."
@@ -639,6 +668,7 @@ class World:
                     self.journal("CONTRACT BREACHED: %s PENALTY %.2f" % (c["company"], c["penalty"]),
                                  "breach", c["penalty"])
                 else:
+                    self.run["met"] += 1
                     self.money += c["fee"]
                     self.rep = min(20.0, self.rep + 0.5)
                     self.queue.append("%s: SERVED. FEE %.0f PAID, ACCOUNT IN GOOD STANDING."
@@ -652,6 +682,7 @@ class World:
         b = C.BALANCE
         proceeds = (self.lines * b["price_line"]
                     + self.extra_slots * b["price_slot"]) * b["liquidation_rate"]
+        statement = final_statement(self, proceeds)
         self.money = max(0.0, self.money + proceeds)
         self.lines = b["start_lines"]
         # every line was sold; the exchange's minimum set arrives working
@@ -673,6 +704,10 @@ class World:
         self.queue.append("LINES SOLD AT %.0f%%, DEBT WRITTEN OFF. WE STILL HAVE THE MACHINE."
                           % (100 * b["liquidation_rate"]))
         self.journal("LIQUIDATION: PROCEEDS %.2f" % proceeds, "liquidation", proceeds)
+        self.statement = statement
+        self.journal(statement, "statement")
+        self.queue.append("A FINAL STATEMENT HAS BEEN PRINTED. TYPE STATEMENT.")
+        self.run = self.new_run()          # the machine is still ours: a new run
 
     def roll_fault(self, rng):
         """Break one line or one module that is currently working."""
@@ -698,6 +733,7 @@ class World:
             self.add_fault("module", n)
             self.queue.append(rng.choice(C.FAULT_MODULE) % n)
         self.journal("FAULT: %s %d DOWN" % (kind.upper(), n), "fault", before)
+        self.run["faults"] += 1
 
     def advance(self, now, rng):
         """Run any ticks that elapsed while nobody was connected."""
@@ -797,7 +833,7 @@ def short(t):
 
 def fold(prefix, text, width=REPORT_WIDTH):
     import textwrap
-    return textwrap.wrap(text, width, initial_indent=prefix,
+    return textwrap.wrap(text, width, initial_indent=prefix, break_on_hyphens=False,
                          subsequent_indent=" " * len(prefix)) or [prefix]
 
 
@@ -838,7 +874,8 @@ def away_entries(w, rows, start):
             entries.append((1, at, what))
         elif kind == "liquidation":
             entries.append((0, at, "THE EXCHANGE DISCONNECTED US FOR NON-PAYMENT. "
-                                   "THE LINES WERE SOLD; WE KEPT THE MACHINE."))
+                                   "THE LINES WERE SOLD; WE KEPT THE MACHINE. "
+                                   "TYPE STATEMENT FOR THE FINAL SHEET."))
         elif kind == "overdrawn":
             entries.append((1, at, "WENT OVERDRAWN."))
         elif kind == "breach":
@@ -863,7 +900,7 @@ def away_entries(w, rows, start):
             entries.append((4, at, line))
         elif kind == "record":
             record = (at, int(val or 0))
-        elif kind in ("lesson", "incident", "project", "statement"):
+        elif kind in ("lesson", "incident", "project"):
             entries.append((1, at, line))
     if record:
         entries.append((3, record[0], "BUSIEST YET: %d CALLERS AT ONCE." % record[1]))
@@ -872,6 +909,33 @@ def away_entries(w, rows, start):
         entries.append((3, None, "ALSO %d SMALL MATTERS ON THE CONSOLE, %+.2f IN ALL."
                         % (small, small_money)))
     return entries
+
+
+def final_statement(w, proceeds):
+    """The run's record, printed when the exchange cuts us off. Written before
+    anything is sold, so it describes the business as it stood."""
+    r = w.run
+    rule = "  " + "-" * (REPORT_WIDTH - 2)
+    out = ["  FINAL STATEMENT%sTICK %d" % (" " * max(1, REPORT_WIDTH - 22 - len(str(w.ticks))),
+                                          w.ticks), rule]
+    out += fold("  ", "THE EXCHANGE HAS DISCONNECTED US FOR NON-PAYMENT. THE LINES "
+                      "WENT FOR %.2f AND THE DEBT IS WRITTEN OFF." % proceeds)
+    out.append("")
+    out.append("  THE RUN")
+    row = "    %-20s %s"
+    out.append(row % ("TRADED FOR", span(w.ticks - int(r["start"]))))
+    out.append(row % ("TOOK IN", "{:,.2f}".format(r["earned"])))
+    out.append(row % ("HIGHEST BALANCE", "{:,.2f}".format(r["peak"])))
+    out.append(row % ("MOST CALLERS", "%d AT ONCE" % w.record))
+    out.append(row % ("CONTRACTS", "%d MET, %d SHORTED" % (int(r["met"]), int(r["short"]))))
+    out.append(row % ("BREAKDOWNS", "%d" % int(r["faults"])))
+    staff = ["%s %s" % (r, i["name"]) for r, i in sorted(w.staff.items())] or ["NOBODY"]
+    out += fold(row % ("STAFF AT THE END", ""), ", ".join(staff))
+    out.append(rule)
+    out += fold("  ", "WE KEEP THE MACHINE: %d MODULE%s, AND %d FRESH LINES FROM THE "
+                      "EXCHANGE. THE NEXT RUN STARTS NOW."
+                % (w.cores, "" if w.cores == 1 else "S", C.BALANCE["start_lines"]))
+    return "\r\n".join(out) + "\r\n"
 
 
 def r_away(w):
@@ -1274,7 +1338,8 @@ def r_news(w):
 def r_log(w):
     rows = []
     if w.db is not None:
-        rows = w.db.execute("SELECT tick, line FROM log ORDER BY id DESC LIMIT 10").fetchall()
+        rows = w.db.execute("SELECT tick, line FROM log WHERE kind IS NULL OR kind != 'statement' "
+                            "ORDER BY id DESC LIMIT 10").fetchall()
     out = ["", "  SYSTEM JOURNAL (LAST 10)", "  " + "-" * 52]
     out += ["  %06d  %s" % (t, l) for t, l in rows] or ["  NOTHING JOURNALISED YET."]
     out.append("")
@@ -1488,6 +1553,7 @@ def do_close(w, args):
     held = c["duration"] - c["ticks_left"]
     allowed = c["duration"] * C.BALANCE["contract_breach_tolerance"]
     if c["breached"] > allowed:
+        w.run["short"] += 1
         w.money -= c["penalty"]
         w.rep = max(0.0, w.rep - 1.0)
         w.drop_contract(cid)
@@ -1495,6 +1561,7 @@ def do_close(w, args):
         return True, ("CLOSED SHORT: %s WAS LATE ON %d TICKS. PENALTY %.0f CHARGED."
                       % (c["company"], c["breached"], c["penalty"]))
     share = min(1.0, held / float(c["duration"]))
+    w.run["met"] += 1
     payout = c["fee"] * share * C.CONTRACT_EARLY_BONUS
     w.money += payout
     w.rep = min(20.0, w.rep + 0.25)
@@ -1793,6 +1860,8 @@ async def run_command(world, rng, lock, line, peer=None):
         world.save()
     elif cmd == "LOG":
         out = r_log(world)
+    elif cmd in ("STATEMENT", "RECORD"):
+        out = "\r\n" + (world.statement or "  NO FINAL STATEMENT: WE HAVE NEVER BEEN CUT OFF.\r\n") + "\r\n"
     elif cmd in ("AWAY", "REPORT", "OVERNIGHT"):
         out = (world.last_report or "  NO REPORT: NOBODY HAS BEEN AWAY SINCE THE MACHINE STARTED.\r\n")
         out = "\r\n" + out + "\r\n"
@@ -1939,6 +2008,11 @@ def snapshot(world):
         "history": [(t, round(m, 1), round(n, 3)) for t, m, n in world.history[-180:]],
         "news": world.queue[-14:],
         "tick_seconds": world.tick_seconds,
+        # the row id of the last final statement: a front end that sees it
+        # change knows the exchange has just cut us off
+        "statement": world.db.execute("SELECT COALESCE(MAX(id), 0) FROM log "
+                                      "WHERE kind='statement'").fetchone()[0]
+                     if world.db is not None else 0,
         "to_next": round(max(0.0, world.last_tick + world.tick_seconds - time.time()), 2),
     }
 
