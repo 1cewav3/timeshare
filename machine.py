@@ -71,8 +71,11 @@ class Poller(threading.Thread):
         while not self.stop:
             try:
                 with urllib.request.urlopen(self.url, timeout=2) as r:
-                    self.state = json.loads(r.read().decode())
-                    self.fetched = time.time()
+                    state = json.loads(r.read().decode())
+                    # stamped inside the dict and swapped in whole, so the
+                    # painter never pairs a new to_next with an old read time
+                    state["_fetched"] = self.fetched = time.time()
+                    self.state = state
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 pass
             threading.Event().wait(0.5)
@@ -493,8 +496,11 @@ class Machine:
             c.itemconfigure(self.fault_text, text="PLANT CLEAR", fill=FADE)
 
         ts = float(s.get("tick_seconds") or 60)
-        stale = time.time() - getattr(self.poller, "fetched", time.time())
-        remaining = max(0.0, min(ts, float(s.get("to_next", 0)) - stale))
+        # count down from when the state was read; past the deadline the next
+        # tick has landed, so keep running into the following cycle instead of
+        # sitting full until the next poll arrives
+        due = float(s.get("_fetched", time.time())) + float(s.get("to_next", 0))
+        remaining = (due - time.time()) % ts or ts
         span = 430 - 241
         c.coords(self.tick_fill, 241, 22, 241 + int(span * (1 - remaining / ts)), 30)
         c.itemconfigure(self.tick_label, text="%ds  ·  next in %ds" % (int(ts), int(remaining + 0.9)))

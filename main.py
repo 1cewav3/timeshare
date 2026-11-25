@@ -1612,7 +1612,7 @@ def snapshot(world):
         "history": [(t, round(m, 1), round(n, 3)) for t, m, n in world.history[-180:]],
         "news": world.queue[-14:],
         "tick_seconds": world.tick_seconds,
-        "to_next": max(0, int(world.tick_seconds - (time.time() - world.last_tick))),
+        "to_next": round(max(0.0, world.last_tick + world.tick_seconds - time.time()), 2),
     }
 
 
@@ -1728,7 +1728,10 @@ async def ticker(world, rng, lock, interval):
     (or the process being down) never loses one: advance() back-fills.
     """
     while True:
-        await asyncio.sleep(min(world.tick_seconds, 5))
+        # sleep to the tick boundary, so the tick lands when /state says it will.
+        # Capped at a second so a TICK change is picked up promptly.
+        due = world.last_tick + world.tick_seconds - time.time()
+        await asyncio.sleep(min(1.0, max(0.02, due)))
         async with lock:
             n = world.advance(time.time(), rng)
             if n:
