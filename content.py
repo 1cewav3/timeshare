@@ -42,6 +42,7 @@ COMMANDS
   INCIDENT        the question waiting for you, and its choices
   DECIDE <word>   answer it; unanswered, the default is taken for you
   MODS            buffs and debuffs currently in force
+  EFFECTS         every trade pushing the business, + and -, and the total
   PRESTIGE        sell the business and start again, better
   GOAL            what you are working towards, and how far away it is
   MODE            which clock drives the world

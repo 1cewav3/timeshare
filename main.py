@@ -657,6 +657,26 @@ class World:
         return int(raw * self.effects()["capacity_mult"])
 
     @property
+    def capacity_raw(self):
+        """Capacity before anything scales it: what the lamps can show."""
+        return min(self.working_cores * self.hardware["core_users"],
+                   self.working_lines * C.BALANCE["line_users"])
+
+    def capacity_why(self):
+        """What is moving capacity the way it moved, in a few words for the panel."""
+        sources = []
+        if self.project:
+            sources.append(("MOVE" if (self.project.get("then") or {}).get("site") is not None
+                            else "WORKS", self.project["while"].get("capacity_mult", 1.0)))
+        for role in self.staff:
+            sources.append((role, C.ROLES[role]["effects"].get("capacity_mult", 1.0)))
+        for m in self.mods:
+            sources.append((m["name"], m["effects"].get("capacity_mult", 1.0)))
+        down = self.capacity < self.capacity_raw
+        return ", ".join(name for name, mult in sources
+                         if (mult < 1.0 if down else mult > 1.0))
+
+    @property
     def served(self):
         return min(self.subs, self.capacity)
 
@@ -1347,6 +1367,97 @@ def r_offers(w):
                % (len(live), C.CONTRACT_MAX_ACTIVE))
     if live:
         out.append("  CLOSE n    call a job in early: paid for the term served, plus the bonus")
+    out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
+# every effect key, how to say it, and whether more of it is good for us
+EFFECT_LABELS = {
+    "capacity_mult": ("CAPACITY", True),
+    "slots_add": ("BATCH SLOTS", True),
+    "demand_mult": ("DEMAND", True),
+    "demand_flat": ("CALLERS", True),
+    "growth_add": ("MARKET GROWTH", True),
+    "rate_mult": ("PRICE PER CALLER", True),
+    "queue_rate": ("QUEUED WORK PAYS", True),
+    "fault_mult": ("BREAKDOWNS", False),
+    "repair_mult": ("REPAIR COSTS", False),
+    "cost_mult": ("RUNNING COSTS", False),
+}
+
+
+def effect_rows(effects, indent="      "):
+    """One line per effect: + if it helps us, - if it hurts, then by how much."""
+    out = []
+    for key, (label, more_is_good) in EFFECT_LABELS.items():
+        if key not in effects:
+            continue
+        v = effects[key]
+        if key.endswith("_mult"):
+            if abs(v - 1.0) < 1e-9:
+                continue
+            up, amount = v > 1.0, "%+.0f%%" % ((v - 1.0) * 100)
+        elif key == "growth_add":
+            up, amount = v > 0, "%+.3f/TICK" % v
+        elif key == "queue_rate":
+            up, amount = v > 0, "%+.0f POINTS" % (v * 100)
+        else:
+            up, amount = v > 0, "%+d" % v
+        if not v:
+            continue
+        out.append("%s%s  %-18s %s" % (indent, "+" if up == more_is_good else "-",
+                                       label, amount))
+    return out
+
+
+def r_effects(w):
+    """Everything pushing the business up or down, by where it comes from."""
+    rule = "  " + "-" * (REPORT_WIDTH - 2)
+    out = ["", "  WHAT IS PUSHING THE BUSINESS", rule,
+           "  + HELPS US   - HURTS US", ""]
+
+    def section(title, entries):
+        rows = []
+        for name, effects, extra in entries:
+            body = effect_rows(effects) + ["      -  " + x for x in extra]
+            if body:
+                rows += ["    " + name] + body
+        if rows:
+            out.append("  " + title)
+            out.extend(rows)
+            out.append("")
+
+    section("STAFF", [("%s %s" % (r, i["name"]), C.ROLES[r]["effects"],
+                       ["%-18s %.2f/TICK" % ("SALARY", C.ROLES[r]["salary"])])
+                      for r, i in sorted(w.staff.items())])
+    section("EQUIPMENT", [(n, C.UPGRADES[n]["effects"], []) for n in sorted(w.owned)])
+    if w.project:
+        section("WORK UNDER WAY", [("%s (%s LEFT)" % (w.project["name"], short(w.project["left"])),
+                                    w.project["while"], [])])
+    if w.incident:
+        inc = w.incident_def()
+        section("WAITING ON YOU", [(inc["title"][:40], inc["while"], [])])
+    section("IN FORCE", [("%s (%s LEFT)" % (m["name"], short(m["ticks_left"])), m["effects"], [])
+                         for m in w.mods])
+    if w.standing:
+        worth = w.standing ** 0.6
+        section("STANDING", [("%d POINTS FROM PAST SALES" % w.standing,
+                              {"rate_mult": 1.0 + 0.06 * worth,
+                               "demand_mult": 1.0 + 0.05 * worth}, [])])
+    if w.bodges:
+        section("BODGES", [("%d REPAIR%s HELD WITH TAPE" % (w.bodges, "" if w.bodges == 1 else "S"),
+                            {"fault_mult": 1.0 + 0.05 * w.bodges}, [])])
+    if len(out) == 5:
+        out += ["  NOTHING: THE BUSINESS RUNS ON ITS OWN NUMBERS.", ""]
+
+    total = w.effects()
+    total["queue_rate"] -= C.BALANCE["queue_rate"]      # show the change, not the base
+    rows = effect_rows(total, indent="    ")
+    out.append(rule)
+    out.append("  ALL TOGETHER")
+    out += rows or ["    NO NET EFFECT."]
+    if w.capacity != w.capacity_raw:
+        out.append("    CAPACITY %d -> %d CALLERS" % (w.capacity_raw, w.capacity))
     out.append("")
     return "\r\n".join(out) + "\r\n"
 
@@ -2100,8 +2211,10 @@ async def run_command(world, rng, lock, line, peer=None):
             ok, msg = do_move(world, parts[1:])
             world.save()
         out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
-    elif cmd in ("MODS", "EFFECTS"):
+    elif cmd == "MODS":
         out = r_mods(world)
+    elif cmd in ("EFFECTS", "TRADES", "LEDGER"):
+        out = r_effects(world)
     elif cmd in ("PRESTIGE", "RETIRE"):
         async with lock:
             ok, msg = do_prestige(world)
@@ -2194,6 +2307,8 @@ def snapshot(world):
         "working_cores": world.working_cores,
         "working_lines": world.working_lines,
         "capacity": world.capacity,
+        "capacity_raw": world.capacity_raw,
+        "capacity_why": world.capacity_why(),
         "subs": world.subs,
         "served": world.served,
         "running": world.running,

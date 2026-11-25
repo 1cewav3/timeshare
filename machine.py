@@ -36,6 +36,10 @@ LAMP = "#a8eb9a"
 GLOW = "#1d2b18"
 OFF = "#242a1e"
 FAULT = "#dc4a3c"
+BOOST = "#8cb8f0"            # places the staff squeeze out of the machine
+BOOST_GLOW = "#16223a"
+TAKEN = "#e8c95a"            # places the works have taken out of service
+TAKEN_GLOW = "#2c2610"
 FAULT_BG = "#2b1512"
 PAPER = "#e9e3d2"
 PAPER_RULE = "#d5cdb6"
@@ -46,6 +50,7 @@ SHADOW = "#b9b19c"
 W, H = 1180, 700
 RACK_MODULES, RACK_LINES = 8, 32   # one rack page: eight module slots, 32 line slots
 MAX_LAMPS = 26                     # the most callers any generation of module carries
+MAX_BOOST = 4                      # blue lamps drawn after a row before it says +n
 BUILD = time.strftime("build %m-%d %H:%M", time.localtime(os.path.getmtime(__file__)))
 LOG = "/tmp/timeshare-launch.log"
 PX0, PX1 = 648, 1164          # paper sheet
@@ -231,6 +236,15 @@ class Machine:
         self.show_sheet(text, "help_win", "operator's manual — SYS/370-145",
                         "N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L")
 
+    def show_effects(self):
+        """Every trade, + and -, on its own sheet; reopening prints it fresh."""
+        old = getattr(self, "effects_win", None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        self.show_sheet(self.fetch("EFFECTS"), "effects_win",
+                        "effects — SYS/370-145",
+                        "N O R T H G A T E   ·   W H A T   P U S H E S   T H E   B U S I N E S S")
+
     def show_sheet(self, text, slot, title, heading):
         """A second sheet of paper in its own window, sized to its text."""
         if getattr(self, slot, None) is not None and getattr(self, slot).winfo_exists():
@@ -327,6 +341,11 @@ class Machine:
             for item in (rect, txt):
                 c.tag_bind(item, "<Button-1>", lambda _e, n=secs: self.set_tick(n))
             self.tick_buttons[secs] = (rect, txt)
+        # the ledger of every trade: what pushes the business up or down
+        rect = c.create_rectangle(790, 17, 900, 35, fill=PANEL, outline=RULE)
+        txt = c.create_text(845, 26, text="E F F E C T S", fill=STENCIL, font=mono(10))
+        for item in (rect, txt):
+            c.tag_bind(item, "<Button-1>", lambda _e: self.show_effects())
         c.create_line(26, 40, W - 26, 40, fill=RULE)
 
         # ---- module rack
@@ -338,7 +357,7 @@ class Machine:
                                   text="MOD %d" % (i + 1))
             dead = c.create_rectangle(139, y - 9, 389, y + 9, fill=PANEL, outline="")
             lamps = []
-            for j in range(MAX_LAMPS):
+            for j in range(MAX_LAMPS + MAX_BOOST):
                 halo = c.create_oval(0, 0, 0, 0, fill=PANEL, outline="")
                 lamp = c.create_oval(0, 0, 0, 0, fill=OFF, outline="")
                 lamps.append((halo, lamp))
@@ -380,7 +399,7 @@ class Machine:
         for r in range(RACK_LINES // 8):
             for i in range(8):
                 x = 42 + i * 74
-                y = 560 + r * 24
+                y = 554 + r * 22          # four rows inside the panel
                 halo = c.create_oval(x - 8, y - 8, x + 8, y + 8, fill=PANEL, outline="")
                 lamp = c.create_oval(x - 5, y - 5, x + 5, y + 5, fill=OFF, outline="")
                 cross = (c.create_line(x - 6, y - 6, x + 6, y + 6, fill=FAULT, width=3,
@@ -463,6 +482,7 @@ class Machine:
                 state = "normal" if j < per_core else "hidden"
                 self.c.itemconfigure(halo, state=state)
                 self.c.itemconfigure(lamp, state=state)
+        self.lamp_pitch = pitch
 
     def show_rack(self, n):
         self.rack = max(0, min(self.racks - 1, n))
@@ -512,12 +532,29 @@ class Machine:
         self.rack = min(self.rack, self.racks - 1)
         self.layout_lamps(per_core)
 
-        # callers fill working modules lowest first, across every rack
-        loads, left = {}, served
+        # callers fill working modules lowest first, across every rack. Lamps
+        # show the plant as built; capacity the works (or a power cut) take
+        # away shows as hollow lamps after the lit ones, and capacity the
+        # engineer squeezes out shows as a +n on the last busy module
+        raw = int(s.get("capacity_raw", working * per_core))
+        cap = int(s.get("capacity", raw))
+        off = max(0, raw - cap)
+        loads, blocked, left, gone = {}, {}, min(served, raw), off
         for n in range(1, cores + 1):
             if n not in down_mods:
                 loads[n] = min(per_core, max(0, left))
                 left -= loads[n]
+                blocked[n] = min(per_core - loads[n], gone)
+                gone -= blocked[n]
+        extra = max(0, served - raw)
+        boost, rest = {}, extra             # blue lamps, a few per busy module
+        busy_mods = [n for n, v in loads.items() if v]
+        while rest and busy_mods and any(boost.get(n, 0) < MAX_BOOST for n in busy_mods):
+            for n in busy_mods:
+                if rest and boost.get(n, 0) < MAX_BOOST:
+                    boost[n] = boost.get(n, 0) + 1
+                    rest -= 1
+        last_busy = max(busy_mods, default=0)
 
         first_mod = self.rack * RACK_MODULES
         slots_here = 0
@@ -546,14 +583,27 @@ class Machine:
                 c.itemconfigure(row["tag"],
                                 text="" if installed else "spare",
                                 fill="#4a5240")
+            blue = boost.get(n, 0)
+            pitch = getattr(self, "lamp_pitch", 30)
+            c.coords(row["tag"], max(404, 150 + (per_core + blue - 1) * pitch + 16), row["y"])
+            if installed and not dead and n == last_busy and rest:
+                c.itemconfigure(row["tag"], text="+%d" % rest, fill=BOOST)
+            shut = blocked.get(n, 0)
             for j, (halo, lamp) in enumerate(row["lamps"]):
                 on = installed and not dead and j < load
-                if dead or j >= per_core:
+                if dead or j >= per_core + blue:
                     c.itemconfigure(lamp, state="hidden")
                     c.itemconfigure(halo, state="hidden")
                     continue
-                c.itemconfigure(lamp, state="normal", fill=LAMP if on else OFF)
-                c.itemconfigure(halo, state="normal", fill=GLOW if on else PANEL)
+                if j >= per_core:                 # squeezed out by the staff
+                    c.itemconfigure(lamp, state="normal", fill=BOOST, outline="")
+                    c.itemconfigure(halo, state="normal", fill=BOOST_GLOW)
+                    continue
+                taken = not on and installed and load <= j < load + shut
+                c.itemconfigure(lamp, state="normal", outline="",
+                                fill=LAMP if on else (TAKEN if taken else OFF))
+                c.itemconfigure(halo, state="normal",
+                                fill=GLOW if on else (TAKEN_GLOW if taken else PANEL))
         c.itemconfigure(self.rack_empty,
                         text="" if slots_here else "NO MODULE SLOTS IN THIS RACK")
 
@@ -584,7 +634,13 @@ class Machine:
         c.itemconfigure(self.cores_text,
                         text="C O R E S   %d        L O A D   %d%%" % (cores, pct))
         c.coords(self.load_bar, 31, 495, 31 + int(2.99 * min(100, pct)), 505)
-        c.itemconfigure(self.load_text, text="%d of %d callers" % (served, capacity))
+        note = ""
+        if capacity != raw:
+            note = "   %s%d: %s" % ("+" if capacity > raw else "", capacity - raw,
+                                    s.get("capacity_why") or "EFFECTS")
+            if capacity < raw:
+                note = "   %d OFF: %s" % (raw - capacity, s.get("capacity_why") or "EFFECTS")
+        c.itemconfigure(self.load_text, text="%d of %d callers%s" % (served, capacity, note))
 
         # a caller takes the lowest working line: the busy ones lead the field
         carrying = min(served, working_lines)
