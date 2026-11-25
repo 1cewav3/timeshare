@@ -261,7 +261,9 @@ class Machine:
         # measured, not guessed: tk scales even pixel sizes on this display, so
         # the rules, the line budget and the help window all use the real pitch
         self.pitch = max(1, face.metrics("linespace"))
-        body_y = 96 + 3 * head.metrics("linespace") + self.pitch // 2
+        self.head_adv = max(1, head.measure("M"))
+        self.head_ls = head.metrics("linespace")
+        body_y = 96 + 3 * self.head_ls + self.pitch // 2
         # printed lines that fit between the header and the rule above the goal
         self.body_room = max(6, (H - 216 - body_y) // self.pitch)
         c.create_rectangle(6, 6, W - 6, H - 6, outline=RULE, fill=BG)
@@ -272,8 +274,6 @@ class Machine:
                       text="N O R T H G A T E")
         c.create_text(W - 26, 26, anchor="e", fill=STENCIL, font=mono(11),
                       text="S Y S / 3 7 0 - 1 4 5")
-        self.fault_text = c.create_text(790, 26, anchor="w", fill=OFF,
-                                        font=mono(10), text="")
         c.create_rectangle(240, 21, 430, 31, fill=PANEL, outline=RULE)
         self.tick_fill = c.create_rectangle(241, 22, 241, 30, fill=LAMP, outline="")
         self.tick_label = c.create_text(438, 26, anchor="w", fill=STENCIL,
@@ -347,6 +347,9 @@ class Machine:
                                     text="NORTHGATE  TELEPRINTER   6 LPI")
         self.p_main = c.create_text(PX0 + 30, 96, anchor="nw", fill=INK, font=mono(12),
                                     text="", width=PX1 - PX0 - 50, justify="left")
+        # the fault count rides beside CASH; placed in paint(), after the cash figure
+        self.fault_text = c.create_text(PX0 + 30, 96 + self.head_ls // 2, anchor="w",
+                                        fill=FADE, font=mono(10), text="")
         self.p_body = c.create_text(PX0 + 30, body_y, anchor="nw", fill=INK, font=mono(11),
                                     text="", width=PX1 - PX0 - 50, justify="left")
         c.create_line(PX0 + 30, H - 208, PX1 - 24, H - 208, fill=FADE)
@@ -451,12 +454,14 @@ class Machine:
                         fill=FAULT if turned else "#4a5240")
 
         net = s.get("net", 0.0)
+        first = "TICK %d        CASH %s" % (s.get("tick", 0), "{:,.2f}".format(s.get("cash", 0.0)))
         c.itemconfigure(self.p_main, text=(
-            "TICK %d        CASH %s\n"
+            first + "\n"
             "NET %+.2f      LINES %d/%d\n"
             "CALLERS %d      REFUSED %d") % (
-            s.get("tick", 0), "{:,.2f}".format(s.get("cash", 0.0)), net,
-            working_lines, lines, served, turned))
+            net, working_lines, lines, served, turned))
+        c.coords(self.fault_text, PX0 + 30 + (len(first) + 3) * self.head_adv,
+                 96 + self.head_ls // 2)
 
         room = self.body_room
         rows = list(self.log)
@@ -483,7 +488,7 @@ class Machine:
                             text="%d FAULT%s" % (len(faults), "" if len(faults) == 1 else "S"),
                             fill=FAULT)
         else:
-            c.itemconfigure(self.fault_text, text="PLANT CLEAR", fill="#4a5240")
+            c.itemconfigure(self.fault_text, text="PLANT CLEAR", fill=FADE)
 
         ts = float(s.get("tick_seconds") or 60)
         stale = time.time() - getattr(self.poller, "fetched", time.time())
