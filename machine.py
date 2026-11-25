@@ -265,6 +265,8 @@ class Machine:
                       text="N O R T H G A T E")
         c.create_text(W - 26, 26, anchor="e", fill=STENCIL, font=mono(11),
                       text="S Y S / 3 7 0 - 1 4 5")
+        self.fault_text = c.create_text(790, 26, anchor="w", fill=OFF,
+                                        font=mono(10), text="")
         c.create_rectangle(240, 21, 430, 31, fill=PANEL, outline=RULE)
         self.tick_fill = c.create_rectangle(241, 22, 241, 30, fill=LAMP, outline="")
         self.tick_label = c.create_text(438, 26, anchor="w", fill=STENCIL,
@@ -311,13 +313,13 @@ class Machine:
         for r in range(4):
             for i in range(8):
                 x = 42 + i * 74
-                y = 562 + r * 30
-                halo = c.create_oval(x - 9, y - 9, x + 9, y + 9, fill=PANEL, outline="")
-                lamp = c.create_oval(x - 6, y - 6, x + 6, y + 6, fill=OFF, outline="")
-                num = c.create_text(x + 18, y, anchor="w", fill=OFF, font=mono(9), text="")
+                y = 560 + r * 24
+                halo = c.create_oval(x - 8, y - 8, x + 8, y + 8, fill=PANEL, outline="")
+                lamp = c.create_oval(x - 5, y - 5, x + 5, y + 5, fill=OFF, outline="")
+                num = c.create_text(x + 16, y, anchor="w", fill=OFF, font=mono(9), text="")
                 self.line_lamps.append((halo, lamp, num))
-        self.turned = c.create_text(LX0 + 14, H - 74, anchor="w", fill=OFF,
-                                    font=mono(11), text="")
+        self.turned = c.create_text(470, 480, anchor="w", fill=OFF,
+                                    font=mono(10), text="")
 
         # ---- the sheet of paper
         c.create_rectangle(PX0 + 3, 59, PX1 + 3, H - 59, fill=SHADOW, outline="")
@@ -439,29 +441,27 @@ class Machine:
             working_lines, lines, served, turned))
 
         room = self.body_room
-        typed_rows = []
-        for kind, text in list(self.log)[-14:]:
-            row = ("› " + text) if kind == "cmd" else ("  " + text)
-            if len(row) > self.body_chars:
-                row = row[:self.body_chars - 1] + "…"
-            typed_rows.append(row)
+        rows = list(self.log)
+        last = max((i for i, (kind, _t) in enumerate(rows) if kind == "cmd"), default=-1)
+        if last >= 0:
+            shown = []
+            for kind, text in rows[last:]:
+                row = ("› " + text) if kind == "cmd" else ("  " + text)
+                if len(row) > self.body_chars:
+                    row = row[:self.body_chars - 1] + "…"
+                shown.append(row)
+            body = shown[:room]
+        else:
+            body = ["N O   C O M M A N D   Y E T", "",
+                    "TYPE HELP FOR THE MANUAL, OR STATUS FOR THE SYSTEM REPORT."]
+        c.itemconfigure(self.p_body, text="\n".join(body))
 
-        news = []
-        for line in (s.get("news") or [])[-6:]:
-            if line not in news:
-                news.append(line)
-        journal = [(n[:self.body_chars - 1] + "…" if len(n) > self.body_chars else n)
-                   for n in news] or ["N O   T R A F F I C   Y E T"]
-
-        body = []
-        if typed_rows:
-            body = ["C O M M A N D S", ""]
-            keep = max(0, room - 6)          # leave room for the journal heading
-            body += typed_rows[-keep:] if keep else []
-            body += [""]
-        body += ["J O U R N A L", ""]
-        body += journal[:max(1, room - len(body))]
-        c.itemconfigure(self.p_body, text="\n".join(body[:room]))
+        if faults:
+            c.itemconfigure(self.fault_text,
+                            text="%d FAULT%s" % (len(faults), "" if len(faults) == 1 else "S"),
+                            fill=FAULT)
+        else:
+            c.itemconfigure(self.fault_text, text="PLANT CLEAR", fill="#4a5240")
 
         ts = float(s.get("tick_seconds") or 60)
         stale = time.time() - getattr(self.poller, "fetched", time.time())
