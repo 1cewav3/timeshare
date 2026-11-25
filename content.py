@@ -41,6 +41,7 @@ COMMANDS
   MODS            buffs and debuffs currently in force
   PRESTIGE        sell the business and start again, better
   GOAL            what you are working towards, and how far away it is
+  MODE            which clock drives the world (WALL or SESSION)
   BUY BUILDING    buy the building that houses the machine (ends the game)
   OFFERS          work offered to you, with a deadline and a penalty
   ACCEPT n        take offer n (up to 3 at once)

@@ -42,8 +42,10 @@ class World:
         self.last_tick = int(time.time())
         self.tier = 0
         self.queue = []
+        self.mode = "wall"         # "wall" = the clock drives it, "session" = only while someone is on
         self.faults = []          # [{"kind": "line"|"module", "n": int, "age": int}]
         self.tick_seconds = TICK_SECONDS
+        self.live = 0              # sockets logged in right now (desk and browser do not count)
         self.extra_slots = 0
         self.rep_trend = 0.0
         self.refused_share = 0.0
@@ -256,7 +258,7 @@ class World:
         if self.db is None:
             return
         row = self.db.execute(
-            "SELECT money, cores, lines, subs, rep, ticks, last_tick, tier, queue "
+            "SELECT money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode "
             "FROM world WHERE id=1"
         ).fetchone()
         if row is None:
@@ -265,6 +267,8 @@ class World:
         (self.money, self.cores, self.lines, self.subs, self.rep,
          self.ticks, self.last_tick, self.tier) = row[:8]
         self.queue = json.loads(row[8] or "[]")
+        if row[9] in ("wall", "session"):
+            self.mode = row[9]
         if not self.subs:
             self.subs = int(self.demand)
         self.rep_trend = 0.0
@@ -288,13 +292,14 @@ class World:
         if self.db is None:
             return
         self.db.execute(
-            "INSERT INTO world (id, money, cores, lines, subs, rep, ticks, last_tick, tier, queue) "
-            "VALUES (1,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO world (id, money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode) "
+            "VALUES (1,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET money=excluded.money, cores=excluded.cores, "
             "lines=excluded.lines, subs=excluded.subs, rep=excluded.rep, ticks=excluded.ticks, "
-            "last_tick=excluded.last_tick, tier=excluded.tier, queue=excluded.queue",
+            "last_tick=excluded.last_tick, tier=excluded.tier, queue=excluded.queue, "
+            "mode=excluded.mode",
             (self.money, self.cores, self.lines, self.subs, self.rep,
-             self.ticks, self.last_tick, self.tier, json.dumps(self.queue)),
+             self.ticks, self.last_tick, self.tier, json.dumps(self.queue), self.mode),
         )
 
     def journal(self, line):
@@ -699,6 +704,18 @@ def r_staff(w):
             out.append("  HIRE %-9s %.0f FEE      %s" % (role, data["fee"], data["desc"]))
     out.append("  FIRE <role>   let someone go")
     out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
+def r_mode(w):
+    out = ["", "  OPERATING MODE", "  " + "-" * 52,
+           "  %-13s %s" % (
+               "WALL CLOCK" if w.mode == "wall" else "SESSION ONLY",
+               "the machine runs whether or not you are dialled in"
+               if w.mode == "wall" else
+               "nothing moves while you are off the line"),
+           "  %-13s %d" % ("LIVE OPERATORS", w.live),
+           ""]
     return "\r\n".join(out) + "\r\n"
 
 
@@ -1300,6 +1317,8 @@ async def run_command(world, rng, lock, line, peer=None):
         out = C.HELP
     elif cmd == "STATUS":
         out = r_status(world)
+    elif cmd == "MODE":
+        out = r_mode(world)
     elif cmd in ("USERS", "WHO"):
         out = r_users(world)
     elif cmd == "JOBS":
@@ -1514,6 +1533,7 @@ async def web_handler(reader, writer, world, rng, lock):
 
 async def handle(reader, writer, world, rng, lock):
     peer = writer.get_extra_info("peername")
+    world.live += 1
     try:
         writer.write(wire("\r\n".join(C.BANNER) + "\r\n"))
         writer.write(b"OPERATOR ID? ")
@@ -1550,6 +1570,7 @@ async def handle(reader, writer, world, rng, lock):
     except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError):
         pass
     finally:
+        world.live = max(0, world.live - 1)
         try:
             writer.close()
         except Exception:
@@ -1581,7 +1602,12 @@ async def serve(port, db_path, interval, web_port=0):
         db.execute("""CREATE TABLE IF NOT EXISTS world(
             id INTEGER PRIMARY KEY CHECK (id=1),
             money REAL, cores INTEGER, lines INTEGER, subs INTEGER,
-            rep REAL, ticks INTEGER, last_tick INTEGER, tier INTEGER, queue TEXT)""")
+            rep REAL, ticks INTEGER, last_tick INTEGER, tier INTEGER, queue TEXT,
+            mode TEXT)""")
+        try:                      # databases made before the mode column existed
+            db.execute("ALTER TABLE world ADD COLUMN mode TEXT")
+        except sqlite3.OperationalError:
+            pass
         db.execute("CREATE TABLE IF NOT EXISTS log(id INTEGER PRIMARY KEY AUTOINCREMENT, tick INTEGER, line TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS fault(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS upgrade(name TEXT PRIMARY KEY, n INTEGER)")
