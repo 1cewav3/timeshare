@@ -53,6 +53,7 @@ COMMANDS
   CLOSE n         call a live job in early; it pays for the term you served
   DROP n          turn offer n down
   NEWS            console messages since you were last on
+  AWAY            what happened while you were gone, again
   LOG             recent system journal
   BYE             drop carrier
 

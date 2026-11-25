@@ -62,6 +62,9 @@ class World:
         self.prestiges = 0         # how many times this world has been sold          # permanent prestige points
         self.last_mod_names = []
         self.history = []          # [(tick, cash, net)] for the web chart
+        self.record = 0            # most callers ever served at once
+        self.seen = {}             # where the last operator left off, see mark_seen
+        self.last_report = ""      # the away report printed at the last login
         self.subs = int(self.demand)      # after the tycoon fields, demand reads them
 
     # -- faults (the only thing in the world that breaks) -------------------
@@ -139,6 +142,7 @@ class World:
         self.save_contract(c)
         self.queue.append(C.CONTRACT_OFFER % (company, work, want, duration,
                                               fee, penalty, c["id"], c["id"]))
+        self.journal("%s|%s|%d|%d" % (company, work, want, c["id"]), "offer", fee)
 
     def offer_slots(self):
         return [c for c in self.contracts if c["state"] in ("offered", "active")]
@@ -155,6 +159,7 @@ class World:
         name, ticks, effects, _weight, good = rng.choice(pool)
         self.mods.append({"name": name, "ticks_left": ticks,
                           "effects": effects, "good": good})
+        self.journal(name, "good" if good else "bad", ticks)
         self.queue.append(("GOOD NEWS: " if good else "BAD NEWS: ") + name
                           + " - " + ", ".join("%s %+.2f" % (k, v) for k, v in effects.items())
                           + " FOR %d TICKS" % ticks)
@@ -169,6 +174,7 @@ class World:
             m["ticks_left"] -= 1
             if m["ticks_left"] <= 0:
                 self.queue.append("%s HAS PASSED." % m["name"])
+                self.journal(m["name"], "passed")
                 if self.db is not None:
                     self.db.execute("DELETE FROM mod WHERE name=?", (m["name"],))
             else:
@@ -197,6 +203,15 @@ class World:
         self.prestiges = int(row[0]) if row else 0
         row = self.db.execute("SELECT n FROM upgrade WHERE name='bodges'").fetchone()
         self.bodges = int(row[0]) if row else 0
+        row = self.db.execute("SELECT n FROM upgrade WHERE name='record'").fetchone()
+        # an old save has no record: start from today, not from zero
+        self.record = int(row[0]) if row else min(self.subs, self.capacity)
+        self.seen = {k[5:]: v for k, v in self.db.execute(
+            "SELECT name, n FROM upgrade WHERE name LIKE 'seen:%'")}
+        if "log" not in self.seen:
+            # a save from before the away report: start counting from here, so
+            # the first report is not the whole history of the world
+            self.mark_seen()
         self.owned = {r[0][3:] for r in self.db.execute(
             "SELECT name FROM upgrade WHERE name LIKE 'up:%'")}
         self.staff = {}
@@ -240,6 +255,8 @@ class World:
             self.db.execute("DELETE FROM upgrade WHERE name NOT IN ('standing', 'prestiges')")
             self.save()
         self.prestiges = saved_prestiges
+        self.record = 0
+        self.mark_seen()
         self.subs = int(self.demand)
         self.queue.append("A NEW MACHINE ARRIVES ON MONDAY MORNING.")
 
@@ -307,12 +324,36 @@ class World:
              self.tick_seconds),
         )
 
-    def journal(self, line):
+    def journal(self, line, kind="op", val=None):
+        """One row per thing that happened, stamped with the tick, the cash and
+        the net rate just after it. kind tells the away report what it was;
+        "op" is anything the operator did, which the report leaves out."""
         if self.db is not None:
-            self.db.execute("INSERT INTO log (tick, line) VALUES (?,?)", (self.ticks, line))
+            self.db.execute("INSERT INTO log (tick, line, cash, net, val, kind) "
+                            "VALUES (?,?,?,?,?,?)",
+                            (self.ticks, line, self.money, self.net, val, kind))
             self.db.execute(
                 "DELETE FROM log WHERE id <= (SELECT MAX(id) FROM log) - ?", (LOG_KEEP,)
             )
+
+    # -- the away report -----------------------------------------------------
+    def mark_seen(self):
+        """Remember where the operator left off: the report starts here."""
+        if self.db is None:
+            return
+        last = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM log").fetchone()[0]
+        self.seen = {"log": last, "tick": self.ticks, "cash": round(self.money, 2),
+                     "net": round(self.net, 4), "served": self.served}
+        for k, v in self.seen.items():
+            self.put("seen:" + k, v)
+
+    def away_rows(self):
+        if self.db is None:
+            return []
+        return self.db.execute(
+            "SELECT tick, line, cash, net, val, kind FROM log WHERE id > ? "
+            "AND kind IS NOT NULL AND kind != 'op' ORDER BY id",
+            (int(self.seen.get("log", 0)),)).fetchall()
 
     # -- staff, upgrades, buffs: one effect pool ------------------------------
     def effects(self):
@@ -496,15 +537,24 @@ class World:
             self.money += dm
             self.rep = max(0.0, self.rep + dr)
             self.queue.append(msg)
+            self.journal(msg, "event", dm)
 
         # contracts: new offers appear, live jobs are scored, deadlines land
         if self.ticks % b["contract_every"] == 0 and rng.random() < b["contract_roll_chance"]:
             self.offer_contract(rng)
         self.settle_contracts()
 
+        # a new high for callers served at once is worth telling someone about
+        if self.served > self.record:
+            self.record = self.served
+            self.put("record", self.record)
+            self.journal("RECORD: %d CALLERS AT ONCE" % self.record, "record", self.record)
+
         # being overdrawn has a clock on it
         if self.money < 0:
             self.overdraft_ticks += 1
+            if self.overdraft_ticks == 1:
+                self.journal("OVERDRAWN", "overdrawn", self.money)
             if self.overdraft_ticks % 60 == 0:
                 self.queue.append("OVERDRAWN FOR %d TICKS. AT %d THE EXCHANGE DISCONNECTS US."
                                   % (self.overdraft_ticks, b["overdraft_grace"]))
@@ -528,13 +578,15 @@ class World:
                     self.rep = max(0.0, self.rep - 1.0)
                     self.queue.append("%s: WE SHORTED THEM ON %d OF %d TICKS. PENALTY %.0f CHARGED."
                                       % (c["company"], c["breached"], c["duration"], c["penalty"]))
-                    self.journal("CONTRACT BREACHED: %s PENALTY %.2f" % (c["company"], c["penalty"]))
+                    self.journal("CONTRACT BREACHED: %s PENALTY %.2f" % (c["company"], c["penalty"]),
+                                 "breach", c["penalty"])
                 else:
                     self.money += c["fee"]
                     self.rep = min(20.0, self.rep + 0.5)
                     self.queue.append("%s: SERVED. FEE %.0f PAID, ACCOUNT IN GOOD STANDING."
                                       % (c["company"], c["fee"]))
-                    self.journal("CONTRACT MET: %s FEE %.2f" % (c["company"], c["fee"]))
+                    self.journal("CONTRACT MET: %s FEE %.2f" % (c["company"], c["fee"]),
+                                 "paid", c["fee"])
                     c["fee"] = 0
                 self.drop_contract(c["id"])
 
@@ -562,10 +614,11 @@ class World:
         self.queue.append("THE EXCHANGE HAS DISCONNECTED US FOR NON-PAYMENT.")
         self.queue.append("LINES SOLD AT %.0f%%, DEBT WRITTEN OFF. WE STILL HAVE THE MACHINE."
                           % (100 * b["liquidation_rate"]))
-        self.journal("LIQUIDATION: PROCEEDS %.2f" % proceeds)
+        self.journal("LIQUIDATION: PROCEEDS %.2f" % proceeds, "liquidation", proceeds)
 
     def roll_fault(self, rng):
         """Break one line or one module that is currently working."""
+        before = self.net
         candidates = []
         working_lines = [i + 1 for i in range(self.lines)
                          if i + 1 not in {f["n"] for f in self.faults_of("line")}]
@@ -586,7 +639,7 @@ class World:
             n = rng.choice(working_cores)
             self.add_fault("module", n)
             self.queue.append(rng.choice(C.FAULT_MODULE) % n)
-        self.journal("FAULT: %s %d DOWN" % (kind.upper(), n))
+        self.journal("FAULT: %s %d DOWN" % (kind.upper(), n), "fault", before)
 
     def advance(self, now, rng):
         """Run any ticks that elapsed while nobody was connected."""
@@ -649,6 +702,168 @@ def r_status(w):
         "",
     ]
     return "\r\n".join(x for x in body if x != "") + "\r\n"
+
+
+# --------------------------------------------------------------------------
+# the away report: what happened while nobody was on, as a timeline
+# --------------------------------------------------------------------------
+REPORT_WIDTH = 49          # the paper sheet prints 51 columns; keep a margin
+REPORT_EVENTS = 9          # timeline rows: with the header and the NOW line the
+                           # report stays inside the sheet's 17 printed lines
+
+
+def clock(t):
+    """Ticks are minutes: +H:MM since the operator left."""
+    h, m = divmod(max(0, int(t)), 60)
+    return "+%d:%02d" % (h, m)
+
+
+def span(t):
+    t = max(0, int(t))
+    days, rest = divmod(t, 1440)
+    h, m = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append("%d DAY%s" % (days, "" if days == 1 else "S"))
+    if h:
+        parts.append("%d HOUR%s" % (h, "" if h == 1 else "S"))
+    if m and not days:
+        parts.append("%d MINUTE%s" % (m, "" if m == 1 else "S"))
+    return " ".join(parts) or "UNDER A MINUTE"
+
+
+def short(t):
+    h, m = divmod(max(0, int(t)), 60)
+    return "%dH%02d" % (h, m)
+
+
+def fold(prefix, text, width=REPORT_WIDTH):
+    import textwrap
+    return textwrap.wrap(text, width, initial_indent=prefix,
+                         subsequent_indent=" " * len(prefix)) or [prefix]
+
+
+def away_entries(w, rows, start):
+    """Turn journal rows into (priority, minute, text) entries. Lower priority
+    survives a long absence; everything is printed in the order it happened."""
+    now = w.ticks - start
+    entries = []
+    small, small_money = 0, 0.0
+    record = None
+    live = {(f["kind"], f["n"]) for f in w.faults}
+    sold = [t - start for t, _l, _c, _n, _v, k in rows if k == "liquidation"]
+    for tick, line, _cash, net, val, kind in rows:
+        at = tick - start
+        if kind == "fault":
+            parts = line.split()                    # FAULT: MODULE 2 DOWN
+            unit, n = parts[1], int(parts[2])
+            what = ("LINE %d WENT DEAD." if unit == "LINE" else "MODULE %d FAILED.") % n
+            before, after = (val or 0.0), (net or 0.0)
+            # a disconnection later on changes the whole plant: count to there
+            until = min([s for s in sold if s >= at] + [now])
+            if unit == "LINE" and until < now:
+                what += " SOLD OFF WITH THE REST AT THE DISCONNECTION."
+                if before - after > 0.005:
+                    what = what[:-1] + (", HAVING COST ABOUT %.0f."
+                                        % ((before - after) * (until - at)))
+            elif (unit.lower(), n) in live:
+                if before - after > 0.005:
+                    what += (" NET %+.2f -> %+.2f A TICK. DOWN %s AT THE LOWER "
+                             "RATE, ABOUT %.0f NOT EARNED. STILL DOWN."
+                             % (before, after, short(until - at), (before - after) * (until - at)))
+                else:
+                    what += (" NO CALLERS LOST AT THE TIME: THE SPARE %s CARRIED "
+                             "THEM. STILL DOWN."
+                             % ("LINES" if unit == "LINE" else "MODULES"))
+            else:
+                what += " SINCE CLEARED."
+            entries.append((1, at, what))
+        elif kind == "liquidation":
+            entries.append((0, at, "THE EXCHANGE DISCONNECTED US FOR NON-PAYMENT. "
+                                   "THE LINES WERE SOLD; WE KEPT THE MACHINE."))
+        elif kind == "overdrawn":
+            entries.append((1, at, "WENT OVERDRAWN."))
+        elif kind == "breach":
+            who = line.split(": ", 1)[-1].rsplit(" PENALTY", 1)[0]
+            entries.append((1, at, "%s: WE SHORTED THEM. PENALTY %.0f." % (who, val or 0)))
+        elif kind == "paid":
+            who = line.split(": ", 1)[-1].rsplit(" FEE", 1)[0]
+            entries.append((2, at, "%s: SERVED IN FULL. FEE %.0f PAID." % (who, val or 0)))
+        elif kind in ("good", "bad"):
+            entries.append((2, at, "%s: %s, FOR %s."
+                            % ("GOOD NEWS" if kind == "good" else "BAD NEWS", line,
+                               short(val or 0))))
+        elif kind == "passed":
+            entries.append((5, at, "%s PASSED." % line))
+        elif kind == "offer":
+            company, work, want, cid = line.split("|")
+            entries.append((3, at, "TELEX: %s WANT %s CALLERS FOR %s. OFFER %s."
+                            % (company, want, work, cid)))
+        elif kind == "event":
+            small += 1
+            small_money += val or 0.0
+            entries.append((4, at, line))
+        elif kind == "record":
+            record = (at, int(val or 0))
+        elif kind in ("lesson", "incident", "project", "statement"):
+            entries.append((1, at, line))
+    if record:
+        entries.append((3, record[0], "BUSIEST YET: %d CALLERS AT ONCE." % record[1]))
+    if small > 2:                               # everyday business, folded
+        entries = [e for e in entries if e[0] != 4]
+        entries.append((3, None, "ALSO %d SMALL MATTERS ON THE CONSOLE, %+.2f IN ALL."
+                        % (small, small_money)))
+    return entries
+
+
+def r_away(w):
+    """The report printed at login. Empty when no time has passed."""
+    seen = w.seen or {}
+    start = int(seen.get("tick", w.ticks))
+    rows = w.away_rows()
+    gone = w.ticks - start
+    if gone <= 0 and not rows:
+        return ""
+    entries = away_entries(w, rows, start)
+    col = "  %%-%ds" % (len(clock(gone)) + 2)      # the time column, as wide as needed
+    rule = "  " + "-" * (REPORT_WIDTH - 2)
+    cash0 = float(seen.get("cash", w.money))
+    out = fold("  ", "WHILE YOU WERE AWAY: %s." % span(gone))
+    out.append(rule)
+    out.append("  CASH %.2f -> %.2f   (%+.2f)" % (cash0, w.money, w.money - cash0))
+    out += fold(col % "+0:00", "NET %+.2f A TICK, %d CALLER%s ON."
+                % (float(seen.get("net", w.net)), int(seen.get("served", 0)),
+                   "" if int(seen.get("served", 0)) == 1 else "S"))
+
+    # keep the most important rows that fit, then print them in order
+    budget, kept = REPORT_EVENTS, []
+    for e in sorted(entries, key=lambda e: (e[0], e[1] if e[1] is not None else 1e9)):
+        cost = len(fold(col % "", e[2]))
+        if cost <= budget:
+            kept.append(e)
+            budget -= cost
+    dropped = len(entries) - len(kept)
+    timed = sorted((e for e in kept if e[1] is not None), key=lambda e: e[1])
+    for _p, at, text in timed:
+        out += fold(col % clock(at), text)
+    for _p, _at, text in (e for e in kept if e[1] is None):
+        out += fold(col % "", text)
+    if not entries:
+        out += fold(col % "", "A QUIET STRETCH. NOTHING BROKE AND THE MACHINE KEPT "
+                    "EARNING." if w.money >= cash0 else
+                    "A QUIET STRETCH. NOTHING BROKE, BUT THE RUNNING COSTS OUTRAN THE "
+                    "CALLERS.")
+    if dropped:
+        out += fold(col % "", "AND %d SMALLER THING%s NOT LISTED."
+                    % (dropped, "" if dropped == 1 else "S"))
+    out.append(rule)
+    now = ["NET %+.2f A TICK" % w.net]
+    if w.faults:
+        now.append("%d FAULT%s" % (len(w.faults), "" if len(w.faults) == 1 else "S"))
+    if w.offers():
+        now.append("%d OFFER%s WAITING" % (len(w.offers()), "" if len(w.offers()) == 1 else "S"))
+    out += fold(col % "NOW", ", ".join(now) + ".")
+    return "\r\n".join(out) + "\r\n"
 
 
 def capacity_line(w):
@@ -1495,6 +1710,9 @@ async def run_command(world, rng, lock, line, peer=None):
         world.save()
     elif cmd == "LOG":
         out = r_log(world)
+    elif cmd in ("AWAY", "REPORT", "OVERNIGHT"):
+        out = (world.last_report or "  NO REPORT: NOBODY HAS BEEN AWAY SINCE THE MACHINE STARTED.\r\n")
+        out = "\r\n" + out + "\r\n"
     elif cmd in ("STAFF", "EMPLOYEES"):
         out = r_staff(world)
     elif cmd == "HIRE":
@@ -1709,6 +1927,12 @@ async def handle(reader, writer, world, rng, lock):
         writer.write(b"OPERATOR ID? ")
         await writer.drain()
         name = clean_line(await asyncio.wait_for(reader.readline(), 120))
+        async with lock:
+            # one report per absence: only the first operator back gets it
+            report = r_away(world) if world.live <= 1 else ""
+            if report:
+                world.last_report = report
+            world.mark_seen()
         down = ""
         if world.faults:
             down = ("  %d FAULT%s DOWN: %s  (TYPE FAULTS)\r\n"
@@ -1717,6 +1941,8 @@ async def handle(reader, writer, world, rng, lock):
         writer.write(("\r\nWELCOME, %s. TICK %d. CASH %.2f. %d CALLERS ON SYSTEM.\r\n%s\r\n"
                       % ((name or "OPERATOR").upper()[:16], world.ticks, world.money,
                          world.subs, down)).encode())
+        if report:
+            writer.write(wire(report + "\r\n"))
         writer.write(PROMPT.encode())
         await writer.drain()
 
@@ -1741,6 +1967,8 @@ async def handle(reader, writer, world, rng, lock):
         pass
     finally:
         world.live = max(0, world.live - 1)
+        if world.live == 0:
+            world.mark_seen()          # the next report starts from this hang-up
         try:
             writer.close()
         except Exception:
@@ -1783,6 +2011,11 @@ async def serve(port, db_path, interval, web_port=0):
             except sqlite3.OperationalError:
                 pass
         db.execute("CREATE TABLE IF NOT EXISTS log(id INTEGER PRIMARY KEY AUTOINCREMENT, tick INTEGER, line TEXT)")
+        for column in ("cash REAL", "net REAL", "val REAL", "kind TEXT"):
+            try:                  # the away report reads these; old saves lack them
+                db.execute("ALTER TABLE log ADD COLUMN " + column)
+            except sqlite3.OperationalError:
+                pass
         db.execute("CREATE TABLE IF NOT EXISTS fault(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS upgrade(name TEXT PRIMARY KEY, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS staff(role TEXT PRIMARY KEY, name TEXT, level INTEGER)")

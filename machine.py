@@ -137,14 +137,37 @@ class Machine:
                     self.sock.sendall(b"OPERATOR 1\n")
                 except OSError:
                     return
-                time.sleep(0.25)
-                try:
-                    self.sock.recv(65536)      # the welcome line
-                except (BlockingIOError, OSError):
-                    pass
+                self.welcome(self.read_to_prompt(4.0))
                 return
             if "OPR>" in out:
                 return
+
+    def read_to_prompt(self, seconds):
+        out, end = "", time.time() + seconds
+        while time.time() < end and "OPR>" not in out:
+            ready, _, _ = select.select([self.sock], [], [], 0.15)
+            if not ready:
+                continue
+            try:
+                data = self.sock.recv(65536)
+            except (BlockingIOError, OSError):
+                break
+            if not data:
+                break
+            out += data.decode("latin-1")
+        return out.replace("OPR>", "")
+
+    def welcome(self, text):
+        """The sheet opens on the away report, if the machine sent one.
+
+        The welcome line itself is not printed: the status strip already
+        carries the tick and the cash."""
+        rows = text.replace("\r\n", "\n").split("\n")
+        start = next((i for i, r in enumerate(rows) if "WHILE YOU WERE AWAY" in r), None)
+        if start is None:
+            return
+        for row in rows[start:]:
+            self.log.append(("out", row.rstrip()))
 
     def submit(self, _e=None):
         line = self.entry.get().strip()
@@ -477,9 +500,10 @@ class Machine:
         room = self.body_room
         rows = list(self.log)
         last = max((i for i, (kind, _t) in enumerate(rows) if kind == "cmd"), default=-1)
-        if last >= 0:
+        if rows:
+            # from the last command on; before any command, the away report
             shown = []
-            for kind, text in rows[last:]:
+            for kind, text in rows[max(0, last):]:
                 row = ("› " + text) if kind == "cmd" else text
                 shown.extend(self.wrap(row))
             while len(shown) > 1 and not shown[-1].strip():
