@@ -9,6 +9,8 @@ you present, and /state supplies every number drawn here. Nothing on the canvas
 is invented — if the engine does not report it, it is not shown.
 """
 import atexit
+import hashlib
+import time
 import json
 import os
 import signal
@@ -37,6 +39,8 @@ FADE = "#8d856f"
 SHADOW = "#b9b19c"
 
 W, H = 1180, 700
+BUILD = "b8348bc1"
+LOG = "/tmp/timeshare-launch.log"
 PX0, PX1 = 648, 1164          # paper sheet
 LX0, LX1 = 16, 632            # left column
 
@@ -220,6 +224,8 @@ class Machine:
         self.goal_text = c.create_text(PX0 + 30, H - 136, anchor="w", fill=INK,
                                        font=mono(10), text="")
 
+        c.create_text(W - 26, H - 28, anchor="e", fill="#323828", font=mono(9),
+                      text=BUILD)
         c.create_line(26, H - 58, W - 26, H - 58, fill=RULE)
         c.create_text(30, H - 28, anchor="w", fill=STENCIL, font=mono(13), text="O P R ›")
         self.note_text = c.create_text(W - 30, H - 28, anchor="e", fill=FADE,
@@ -399,6 +405,21 @@ def parse():
     return ap.parse_args()
 
 
+def log_launch(root):
+    try:
+        with open(__file__, "rb") as fh:
+            digest = hashlib.md5(fh.read()).hexdigest()[:8]
+        line = "%.0f build=%s file=%s md5=%s tk_scale=%.3f screen=%dx%d win=%s argv=%s\n" % (
+            time.time(), BUILD, os.path.abspath(__file__), digest,
+            root.tk.call("tk", "scaling"),
+            root.winfo_screenwidth(), root.winfo_screenheight(),
+            root.winfo_geometry(), " ".join(sys.argv[1:]))
+        with open(LOG, "a") as fh:
+            fh.write(line)
+    except Exception as exc:              # never let logging break the game
+        print("log failed:", exc, file=sys.stderr)
+
+
 def main():
     args = parse()
     child = ensure_world(args.host, args.port, args.web, args.db, args.tick)
@@ -415,6 +436,7 @@ def main():
 
     root = tk.Tk()
     app = Machine(root, args.host, args.port, args.web)
+    root.after(600, lambda: log_launch(root))
     root.bind("<Escape>", lambda e: root.destroy())
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda *_: root.destroy())   # so the world goes with the window
