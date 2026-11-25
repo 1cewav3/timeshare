@@ -11,6 +11,7 @@ python3 main.py --port 2023 --db /tmp/demo.db
 python3 play.py                      # second terminal
 python3 main.py --port 2023 --web 2024   # browser board on :2024
 python3 panel.py 127.0.0.1 2023 2024     # the machine, drawn as a panel
+python3 machine.py 127.0.0.1 2023 2024   # the machine, as its own window
 ```
 
 The panel needs the board port: it reads the numbers from `/state` and keeps
