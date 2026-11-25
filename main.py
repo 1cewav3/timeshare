@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import pathlib
 import json
 import os
 import random
@@ -1499,9 +1498,6 @@ def snapshot(world):
     }
 
 
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
-MIME = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-        ".js": "application/javascript; charset=utf-8", ".png": "image/png"}
 
 
 async def web_handler(reader, writer, world, rng, lock):
@@ -1543,15 +1539,10 @@ async def web_handler(reader, writer, world, rng, lock):
             ctype = "application/json"
             status = "200 OK"
         else:
-            name = "index.html" if path in ("/", "") else path.lstrip("/")
-            full = os.path.normpath(os.path.join(WEB_DIR, name))
-            if not full.startswith(WEB_DIR) or not os.path.isfile(full):
-                payload = b"not found"
-                ctype, status = "text/plain", "404 Not Found"
-            else:
-                payload = pathlib.Path(full).read_bytes()
-                ctype = MIME.get(os.path.splitext(full)[1], "application/octet-stream")
-                status = "200 OK"
+            # no pages are served: the board was removed on purpose. This port
+            # exists for /state (and /cmd) so front ends can read the numbers.
+            payload = b"this port serves /state and /cmd only\n"
+            ctype, status = "text/plain", "404 Not Found"
         head = ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
                 "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
                 % (status, ctype, len(payload)))
@@ -1677,7 +1668,7 @@ async def serve(port, db_path, interval, web_port=0):
     print("timeshare up on port %d, state %s, tick %ds"
           % (port, db_path or "(memory only)", interval), flush=True)
     if web_server:
-        print("board at http://0.0.0.0:%d/" % web_port, flush=True)
+        print("state at http://0.0.0.0:%d/state" % web_port, flush=True)
     async with server:
         await server.serve_forever()
 
