@@ -159,6 +159,12 @@ class Machine:
         answer = self.fetch(line, seconds=2.0)
         for row in answer.splitlines():
             self.log.append(("out", row.rstrip()))   # the engine's columns are the layout
+        if line.split()[0].upper() in ("BYE", "QUIT", "EXIT", "LOGOFF"):
+            # the engine hangs up on these; leave the sign-off on the paper for
+            # a moment, then close, which also stops a world this window started
+            self.entry.configure(state="disabled")
+            self.root.after(1200, self.root.destroy)
+            return
         self.read_socket()
 
     def set_tick(self, seconds):
