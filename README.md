@@ -14,6 +14,18 @@ python3 main.py --port 2023 --web 2024   # browser board on :2024
 
 Stdlib only. No install step.
 
+## world clock
+
+The world runs on the clock whether or not anyone is dialled in, and catches
+up when you come back. If you would rather it only moved while you are
+playing:
+
+```
+MODE SESSION
+```
+
+`MODE WALL` puts it back on the clock. The choice is saved with the world.
+
 ## checks
 
 ```
