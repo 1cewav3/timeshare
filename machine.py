@@ -423,8 +423,10 @@ class Machine:
                 c.itemconfigure(lamp, state="normal", fill=LAMP if on else OFF)
                 c.itemconfigure(halo, state="normal", fill=GLOW if on else PANEL)
 
-        capacity = max(1, working * per_core)
-        pct = int(100 * served / capacity)
+        # the engine's capacity is min(modules, lines): modules with no lines to
+        # feed them add nothing, and the bar has to show that, not headroom
+        capacity = int(s.get("capacity", working * per_core))
+        pct = int(100 * served / max(1, capacity))
         c.itemconfigure(self.cores_text,
                         text="C O R E S   %d        L O A D   %d%%" % (cores, pct))
         c.coords(self.load_bar, 31, 495, 31 + int(2.99 * min(100, pct)), 505)
