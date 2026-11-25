@@ -545,8 +545,10 @@ class World:
         self.money = max(0.0, self.money + proceeds)
         self.lines = b["start_lines"]
         self.extra_slots = 0
-        if self.db is not None:
-            self.db.execute("DELETE FROM upgrade")
+        # persist only what was sold. The old DELETE FROM upgrade also took
+        # standing, prestiges, site, bodges and equipment off the save while
+        # play carried on with them, so a restart silently lost them.
+        self.put("slots", 0)
         self.subs = 0
         self.rep = 0.0
         self.overdraft_ticks = 0
