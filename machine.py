@@ -10,6 +10,7 @@ is invented — if the engine does not report it, it is not shown.
 """
 import atexit
 import collections
+import math
 import hashlib
 import time
 import json
@@ -43,6 +44,8 @@ FADE = "#8d856f"
 SHADOW = "#b9b19c"
 
 W, H = 1180, 700
+RACK_MODULES, RACK_LINES = 8, 32   # one rack page: eight module slots, 32 line slots
+MAX_LAMPS = 26                     # the most callers any generation of module carries
 BUILD = time.strftime("build %m-%d %H:%M", time.localtime(os.path.getmtime(__file__)))
 LOG = "/tmp/timeshare-launch.log"
 PX0, PX1 = 648, 1164          # paper sheet
@@ -111,6 +114,8 @@ class Machine:
                               highlightcolor=RULE)
         self.entry.place(x=150, y=H - 46, width=W - 380, height=28)
         self.entry.bind("<Return>", self.submit)
+        for key, step in (("<Prior>", -1), ("<Next>", 1)):
+            root.bind_all(key, lambda _e, d=step: self.show_rack(self.rack + d))
         self.entry.focus_set()
 
         root.after(200, self.refresh)
@@ -327,20 +332,39 @@ class Machine:
         # ---- module rack
         self.panel(LX0, 56, LX1, 452, "M O D U L E   L A M P S")
         self.mod_rows = []
-        for i in range(8):
+        for i in range(RACK_MODULES):
             y = 88 + i * 44
             label = c.create_text(30, y, anchor="w", fill=STENCIL, font=mono(13),
                                   text="MOD %d" % (i + 1))
             dead = c.create_rectangle(139, y - 9, 389, y + 9, fill=PANEL, outline="")
             lamps = []
-            for j in range(8):
-                x = 150 + j * 30
-                halo = c.create_oval(x - 11, y - 11, x + 11, y + 11, fill=PANEL, outline="")
-                lamp = c.create_oval(x - 7, y - 7, x + 7, y + 7, fill=OFF, outline="")
+            for j in range(MAX_LAMPS):
+                halo = c.create_oval(0, 0, 0, 0, fill=PANEL, outline="")
+                lamp = c.create_oval(0, 0, 0, 0, fill=OFF, outline="")
                 lamps.append((halo, lamp))
             tag = c.create_text(404, y, anchor="w", fill=FAULT, font=mono(11), text="")
-            self.mod_rows.append({"label": label, "lamps": lamps,
+            self.mod_rows.append({"label": label, "lamps": lamps, "y": y,
                                   "dead": dead, "tag": tag})
+        self.lamp_layout = None
+        self.layout_lamps(8)
+
+        # rack tabs: one per cabinet the site has room for; PgUp/PgDn flip
+        self.rack = 0
+        self.racks = 1
+        self.rack_tabs = []
+        for k in range(10):
+            x = LX1 - 30 - k * 28
+            rect = c.create_rectangle(x, 60, x + 22, 76, fill=PANEL, outline=RULE,
+                                      state="hidden")
+            txt = c.create_text(x + 11, 68, text="", fill=STENCIL, font=mono(10),
+                                state="hidden")
+            for item in (rect, txt):
+                c.tag_bind(item, "<Button-1>", lambda _e, n=k: self.show_rack(n))
+            self.rack_tabs.append((rect, txt))
+        self.rack_hint = c.create_text(0, 68, anchor="e", text="", fill="#4a5240",
+                                       font=mono(9))
+        self.rack_empty = c.create_text(LX0 + 308, 250, text="", fill="#4a5240",
+                                        font=mono(11))
 
         # ---- cores / load
         self.panel(LX0, 462, LX1, 520)
@@ -353,14 +377,18 @@ class Machine:
         # ---- lines
         self.panel(LX0, 530, LX1, H - 62, "D I A L - I N   L I N E S")
         self.line_lamps = []
-        for r in range(4):
+        for r in range(RACK_LINES // 8):
             for i in range(8):
                 x = 42 + i * 74
                 y = 560 + r * 24
                 halo = c.create_oval(x - 8, y - 8, x + 8, y + 8, fill=PANEL, outline="")
                 lamp = c.create_oval(x - 5, y - 5, x + 5, y + 5, fill=OFF, outline="")
+                cross = (c.create_line(x - 6, y - 6, x + 6, y + 6, fill=FAULT, width=3,
+                                       state="hidden"),
+                         c.create_line(x - 6, y + 6, x + 6, y - 6, fill=FAULT, width=3,
+                                       state="hidden"))
                 num = c.create_text(x + 16, y, anchor="w", fill=OFF, font=mono(9), text="")
-                self.line_lamps.append((halo, lamp, num))
+                self.line_lamps.append((halo, lamp, num, cross))
         self.turned = c.create_text(470, 480, anchor="w", fill=OFF,
                                     font=mono(10), text="")
 
@@ -418,6 +446,29 @@ class Machine:
         return textwrap.wrap(row, self.body_chars, subsequent_indent=" " * (lead + 2),
                              break_long_words=True) or [row[:self.body_chars]]
 
+    def layout_lamps(self, per_core):
+        """One lamp per caller the module carries; more callers, smaller lamps."""
+        per_core = max(1, min(MAX_LAMPS, per_core))
+        if self.lamp_layout == per_core:
+            return
+        self.lamp_layout = per_core
+        pitch = min(30.0, 240.0 / per_core)
+        r_lamp, r_halo = min(7.0, pitch * 0.3), min(11.0, pitch * 0.46)
+        for row in self.mod_rows:
+            y = row["y"]
+            for j, (halo, lamp) in enumerate(row["lamps"]):
+                x = 150 + j * pitch
+                self.c.coords(halo, x - r_halo, y - r_halo, x + r_halo, y + r_halo)
+                self.c.coords(lamp, x - r_lamp, y - r_lamp, x + r_lamp, y + r_lamp)
+                state = "normal" if j < per_core else "hidden"
+                self.c.itemconfigure(halo, state=state)
+                self.c.itemconfigure(lamp, state=state)
+
+    def show_rack(self, n):
+        self.rack = max(0, min(self.racks - 1, n))
+        if self.poller.state:
+            self.paint(self.poller.state)
+
     # --------------------------------------------------------------- painting
     def refresh(self):
         if self.poller.state:
@@ -452,14 +503,40 @@ class Machine:
         down_mods = {f["n"] for f in faults if f.get("kind") == "module"}
         down_lines = {f["n"] for f in faults if f.get("kind") == "line"}
 
-        left = served
+        room = s.get("room") or {}
+        room_m = int(room.get("modules", RACK_MODULES))
+        room_l = int(room.get("lines", RACK_LINES))
+        self.racks = max(1, min(len(self.rack_tabs), max(
+            math.ceil(max(cores, room_m) / RACK_MODULES),
+            math.ceil(max(lines, room_l) / RACK_LINES))))
+        self.rack = min(self.rack, self.racks - 1)
+        self.layout_lamps(per_core)
+
+        # callers fill working modules lowest first, across every rack
+        loads, left = {}, served
+        for n in range(1, cores + 1):
+            if n not in down_mods:
+                loads[n] = min(per_core, max(0, left))
+                left -= loads[n]
+
+        first_mod = self.rack * RACK_MODULES
+        slots_here = 0
         for i, row in enumerate(self.mod_rows):
-            n = i + 1
+            n = first_mod + i + 1
             installed = n <= cores
             dead = n in down_mods
-            load = min(per_core, max(0, left)) if (installed and not dead) else 0
-            if installed and not dead:
-                left -= load
+            load = loads.get(n, 0)
+            has_slot = n <= max(cores, room_m)
+            slots_here += has_slot
+            vis = "normal" if has_slot else "hidden"
+            for item in (row["label"], row["dead"], row["tag"]):
+                c.itemconfigure(item, state=vis)
+            c.itemconfigure(row["label"], text="MOD %d" % n)
+            if not has_slot:
+                for halo, lamp in row["lamps"]:
+                    c.itemconfigure(halo, state="hidden")
+                    c.itemconfigure(lamp, state="hidden")
+                continue
             c.itemconfigure(row["label"], fill=STENCIL if installed else "#323828")
             if installed and dead:
                 c.itemconfigure(row["dead"], fill=FAULT, outline="")
@@ -471,12 +548,34 @@ class Machine:
                                 fill="#4a5240")
             for j, (halo, lamp) in enumerate(row["lamps"]):
                 on = installed and not dead and j < load
-                if dead:
+                if dead or j >= per_core:
                     c.itemconfigure(lamp, state="hidden")
                     c.itemconfigure(halo, state="hidden")
                     continue
                 c.itemconfigure(lamp, state="normal", fill=LAMP if on else OFF)
                 c.itemconfigure(halo, state="normal", fill=GLOW if on else PANEL)
+        c.itemconfigure(self.rack_empty,
+                        text="" if slots_here else "NO MODULE SLOTS IN THIS RACK")
+
+        # tabs: lit for the rack on show, red if a rack you cannot see has a fault
+        for k, (rect, txt) in enumerate(self.rack_tabs):
+            if k >= self.racks or self.racks == 1:
+                c.itemconfigure(rect, state="hidden")
+                c.itemconfigure(txt, state="hidden")
+                continue
+            mods = range(k * RACK_MODULES + 1, (k + 1) * RACK_MODULES + 1)
+            lns = range(k * RACK_LINES + 1, (k + 1) * RACK_LINES + 1)
+            faulty = any(m in down_mods for m in mods) or any(n in down_lines for n in lns)
+            x = LX1 - 30 - (self.racks - 1 - k) * 28
+            c.coords(rect, x, 60, x + 22, 76)
+            c.coords(txt, x + 11, 68)
+            active = k == self.rack
+            c.itemconfigure(rect, state="normal", fill=LAMP if active else PANEL,
+                            outline=FAULT if faulty and not active else RULE)
+            c.itemconfigure(txt, state="normal", text=chr(ord("A") + k),
+                            fill=BG if active else (FAULT if faulty else STENCIL))
+        c.coords(self.rack_hint, LX1 - 36 - (self.racks - 1) * 28, 68)
+        c.itemconfigure(self.rack_hint, text="RACK  PGUP/PGDN" if self.racks > 1 else "")
 
         # the engine's capacity is min(modules, lines): modules with no lines to
         # feed them add nothing, and the bar has to show that, not headroom
@@ -487,24 +586,37 @@ class Machine:
         c.coords(self.load_bar, 31, 495, 31 + int(2.99 * min(100, pct)), 505)
         c.itemconfigure(self.load_text, text="%d of %d callers" % (served, capacity))
 
-        busy = min(served, working_lines)
-        for idx, (halo, lamp, num) in enumerate(self.line_lamps):
-            n = idx + 1
-            if n > max(1, lines):
+        # a caller takes the lowest working line: the busy ones lead the field
+        carrying = min(served, working_lines)
+        busy = set()
+        for n in range(1, lines + 1):
+            if len(busy) >= carrying:
+                break
+            if n not in down_lines:
+                busy.add(n)
+        first_line = self.rack * RACK_LINES
+        for idx, (halo, lamp, num, cross) in enumerate(self.line_lamps):
+            n = first_line + idx + 1
+            dead = n in down_lines and n <= lines
+            for stroke in cross:
+                c.itemconfigure(stroke, state="normal" if dead else "hidden")
+            if n > max(lines, room_l):
+                for item in (halo, lamp):
+                    c.itemconfigure(item, state="hidden")
+                c.itemconfigure(num, text="")
+                continue
+            for item in (halo, lamp):
+                c.itemconfigure(item, state="hidden" if dead else "normal")
+            if n > lines:                       # room for it, not bought
                 c.itemconfigure(lamp, fill=OFF)
                 c.itemconfigure(halo, fill=PANEL)
                 c.itemconfigure(num, text="", fill=OFF)
                 continue
-            c.itemconfigure(num, text="%02d" % n, fill=FADE if n <= busy else "#4a5240")
-            if n in down_lines:
-                c.itemconfigure(lamp, fill=FAULT)
-                c.itemconfigure(halo, fill=FAULT_BG)
-            elif n <= busy:
-                c.itemconfigure(lamp, fill=LAMP)
-                c.itemconfigure(halo, fill=GLOW)
-            else:
-                c.itemconfigure(lamp, fill=OFF)
-                c.itemconfigure(halo, fill=PANEL)
+            c.itemconfigure(num, text="%02d" % n,
+                            fill=FAULT if dead else (FADE if n in busy else "#4a5240"))
+            on = n in busy
+            c.itemconfigure(lamp, fill=LAMP if on else OFF)
+            c.itemconfigure(halo, fill=GLOW if on else PANEL)
 
         turned = max(0, demand - served)
         c.itemconfigure(self.turned, text="TURNED AWAY  %d" % turned,

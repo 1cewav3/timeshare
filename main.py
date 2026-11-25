@@ -633,6 +633,11 @@ class World:
         return C.LOCATIONS[self.site][0]
 
     @property
+    def room(self):
+        """(modules, lines) this site has space for."""
+        return C.SITE_ROOM[min(self.site, len(C.SITE_ROOM) - 1)]
+
+    @property
     def ceiling(self):
         return C.LOCATIONS[self.site][2]
 
@@ -1275,11 +1280,11 @@ def r_sites(w):
     out = ["", "  SITES", "  " + "-" * 52]
     for i, (name, _p, ceiling, base_cost) in enumerate(C.LOCATIONS):
         price = w.site_price(i)
-        here = "  <== YOU ARE HERE" if i == w.site else ""
-        out.append("  %d  %-28s market %3d   rent %.2f/tick   %s%s"
+        mods, lines = C.SITE_ROOM[min(i, len(C.SITE_ROOM) - 1)]
+        out.append("  %d  %-28s market %3d   rent %.2f/tick   %s"
                    % (i, name, ceiling, base_cost * (C.BALANCE["prestige_rent_growth"] ** w.prestiges),
-                      "HERE" if i == w.site else ("%.0f TO MOVE" % price if i > w.site else "outgrown"),
-                      ""))
+                      "HERE" if i == w.site else ("%.0f TO MOVE" % price if i > w.site else "outgrown")))
+        out.append("     room for %d modules and %d lines" % (mods, lines))
     out.append("")
     out.append("  MOVE <n>   e.g. MOVE 1")
     out.append("")
@@ -1542,6 +1547,13 @@ def do_buy(w, args):
     else:
         return False, "WE DO NOT SELL %s." % what
     total = price * n
+    if key in ("cores", "lines"):
+        room = w.room[0 if key == "cores" else 1]
+        have = getattr(w, key)
+        if have + n > room:
+            return False, ("%s HAS ROOM FOR %d %s AND WE HAVE %d. A BIGGER SITE HAS MORE: "
+                           "TYPE SITES." % (w.site_name, room,
+                                            "MODULES" if key == "cores" else "LINES", have))
     if w.money < total:
         return False, "INSUFFICIENT FUNDS: %s REQUIRES %.2f, CASH IS %.2f." % (what, total, w.money)
     w.money -= total
@@ -2175,6 +2187,7 @@ def snapshot(world):
         "cycle": world.prestiges,
         "callers_per_core": world.hardware["core_users"],
         "site_index": world.site,
+        "room": {"modules": world.room[0], "lines": world.room[1]},
         "ceiling": world.ceiling,
         "cores": world.cores,
         "lines": world.lines,
@@ -2468,7 +2481,8 @@ def sim(ticks, seed, strategy):
 
     def reckless(_w, _t):
         while _w.money > b["price_core"] * 1.2:
-            do_buy(_w, ["CORES", "1"])
+            if not do_buy(_w, ["CORES", "1"])[0]:
+                break                  # the room is full: nothing left to overbuy
 
     def tycoon(_w, _t):
         """Engaged operator who also spends on staff, kit and premises."""

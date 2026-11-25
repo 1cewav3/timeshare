@@ -256,6 +256,11 @@ LOCATIONS = [
     ("THE OLD EXCHANGE BUILDING", 18000.0, 320, 1.60),
 ]
 
+# how much plant each site has room for, by LOCATIONS index: (modules, lines).
+# Lines match the site's market, so the room never caps you below the callers
+# who want you; a bigger site is how the plant grows past them.
+SITE_ROOM = [(8, 64), (20, 150), (40, 320)]
+
 # a generation per cycle: the machine you get after each sale
 HARDWARE = [
     {"name": "VALVE", "core_users": 8, "price_core": 95.0, "core_cost": 0.012,

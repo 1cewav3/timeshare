@@ -21,7 +21,8 @@ Stdlib only. No install step.
 ## world clock
 
 The world runs on the clock whether or not anyone is dialled in, and catches
-up when you come back. If you would rather it only moved while you are
+up when you come back: the sheet opens on a report of what happened while you
+were gone (`AWAY` prints it again). If you would rather it only moved while you are
 playing:
 
 ```
@@ -33,8 +34,14 @@ MODE SESSION
 ## checks
 
 ```
-python3 tools/smoke.py 127.0.0.1 2023
+python3 main.py --port 2099 --db /tmp/test.db --tick 1 &   # a throwaway world
+python3 tools/smoke.py 127.0.0.1 2099 --force
+for t in away lesson statement incident site sell liquidate tycoon contract goal rep; do
+    python3 tools/${t}_check.py
+done
 ```
+
+Never point the smoke test at a world someone is playing: it spends money.
 
 All the fiction and every number live in `content.py`. `main.py` is the
 engine; `tools/` are the checks that keep it honest.

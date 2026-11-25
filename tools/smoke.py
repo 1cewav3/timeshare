@@ -77,7 +77,7 @@ def main():
     out = cmd("BUY NONSENSE 1")
     checks.append(("BUY refuses what it does not sell", "ERR:" in out))
 
-    out = cmd("BUY CORES 99")
+    out = cmd("BUY CORES 5")          # within the room, beyond the purse
     checks.append(("BUY refuses without funds", "INSUFFICIENT FUNDS" in out))
 
     out = cmd("BUY SLOTS 2")
