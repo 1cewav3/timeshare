@@ -208,7 +208,8 @@ class Machine:
                                     text="", width=PX1 - PX0 - 50, justify="left")
         self.p_body = c.create_text(PX0 + 30, 148, anchor="nw", fill=INK, font=mono(11),
                                     text="", width=PX1 - PX0 - 50, justify="left")
-        self.goal_label = c.create_text(PX0 + 30, H - 186, anchor="w", fill=FADE,
+        c.create_line(PX0 + 30, H - 208, PX1 - 24, H - 208, fill=FADE)
+        self.goal_label = c.create_text(PX0 + 30, H - 190, anchor="w", fill=FADE,
                                         font=mono(10), text="")
         c.create_rectangle(PX0 + 30, H - 172, PX1 - 24, H - 152, fill=PAPER_RULE, outline="")
         self.goal_bar = c.create_rectangle(PX0 + 30, H - 172, PX0 + 30, H - 152, fill=INK, outline="")
@@ -259,8 +260,12 @@ class Machine:
                                 fill="#4a5240")
             for j, (halo, lamp) in enumerate(row["lamps"]):
                 on = installed and not dead and j < load
-                c.itemconfigure(lamp, fill=PANEL if dead else (LAMP if on else OFF))
-                c.itemconfigure(halo, fill=PANEL if dead else (GLOW if on else PANEL))
+                if dead:
+                    c.itemconfigure(lamp, state="hidden")
+                    c.itemconfigure(halo, state="hidden")
+                    continue
+                c.itemconfigure(lamp, state="normal", fill=LAMP if on else OFF)
+                c.itemconfigure(halo, state="normal", fill=GLOW if on else PANEL)
 
         capacity = max(1, working * per_core)
         pct = int(100 * served / capacity)
@@ -294,12 +299,16 @@ class Machine:
 
         net = s.get("net", 0.0)
         c.itemconfigure(self.p_main, text=(
-            "TICK %d      CASH %s      NET %+.2f\n"
-            "LINES %d/%d   CALLERS %d   REFUSED %d") % (
+            "TICK %d        CASH %s\n"
+            "NET %+.2f      LINES %d/%d\n"
+            "CALLERS %d      REFUSED %d") % (
             s.get("tick", 0), "{:,.2f}".format(s.get("cash", 0.0)), net,
             working_lines, lines, served, turned))
 
-        news = (s.get("news") or [])[-4:]
+        news = []
+        for line in (s.get("news") or [])[-6:]:
+            if line not in news:
+                news.append(line)
         body = ["J O U R N A L", ""]
         body += [n[:46] for n in news] or ["N O   T R A F F I C   Y E T"]
         if faults:
@@ -323,10 +332,13 @@ class Machine:
         staff = [str(i.get("name", "?")).title() for i in (s.get("staff") or [])][:4]
         if staff:
             body += ["", "S T A F F", ""] + [",  ".join(staff)]
+        room = 21                      # lines that fit above the goal block
+        if len(body) > room:
+            body = body[:room - 1] + ["… review the journal for the rest"]
         c.itemconfigure(self.p_body, text="\n".join(body))
 
         goal = s.get("goal") or {}
-        gpct = float(goal.get("pct", 0))
+        gpct = max(0.0, min(100.0, float(goal.get("pct", 0))))
         span = (PX1 - 24) - (PX0 + 30)
         c.coords(self.goal_bar, PX0 + 30, H - 172,
                  PX0 + 30 + int(span * min(1.0, gpct / 100.0)), H - 152)
