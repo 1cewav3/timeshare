@@ -580,6 +580,9 @@ class World:
         if self.last_tick <= 0:
             self.last_tick = now
             return 0
+        if self.mode == "session" and self.live <= 0:
+            self.last_tick = now        # frozen: quiet time is never owed back
+            return 0
         elapsed = int((now - self.last_tick) // self.tick_seconds)
         if elapsed <= 0:
             return 0
@@ -715,8 +718,34 @@ def r_mode(w):
                if w.mode == "wall" else
                "nothing moves while you are off the line"),
            "  %-13s %d" % ("LIVE OPERATORS", w.live),
+           "",
+           "  MODE WALL     run on the clock, even with nobody on",
+           "  MODE SESSION  run only while someone is dialled in",
            ""]
     return "\r\n".join(out) + "\r\n"
+
+
+def do_mode(w, args):
+    """Returns (ok, message)."""
+    if not args:
+        return False, "USAGE: MODE WALL   |   MODE SESSION"
+    want = args[0].upper()
+    if want in ("WALL", "CLOCK", "REAL", "TIME"):
+        want = "wall"
+    elif want in ("SESSION", "PAUSE", "LIVE", "ONLINE"):
+        want = "session"
+    else:
+        return False, "MODE IS EITHER WALL OR SESSION."
+    if want == w.mode:
+        return True, "ALREADY RUNNING IN %s MODE." % want.upper()
+    w.mode = want
+    w.last_tick = int(time.time())      # the switch never banks or owes ticks
+    w.journal("MODE SET TO %s" % want.upper())
+    if want == "session":
+        return True, ("THE MACHINE NOW STOPS WHEN EVERYONE HANGS UP. "
+                      "NO TICKS PASS WHILE THE LINES ARE QUIET.")
+    return True, ("THE MACHINE NOW RUNS ON THE CLOCK. IT KEEPS GOING "
+                  "WHILE NOBODY IS DIALLED IN.")
 
 
 def r_upgrades(w):
@@ -1318,7 +1347,13 @@ async def run_command(world, rng, lock, line, peer=None):
     elif cmd == "STATUS":
         out = r_status(world)
     elif cmd == "MODE":
-        out = r_mode(world)
+        if len(parts) > 1:
+            async with lock:
+                ok, msg = do_mode(world, parts[1:])
+                world.save()
+            out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+        else:
+            out = r_mode(world)
     elif cmd in ("USERS", "WHO"):
         out = r_users(world)
     elif cmd == "JOBS":
