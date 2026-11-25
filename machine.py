@@ -13,6 +13,7 @@ import hashlib
 import time
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -87,6 +88,7 @@ class Machine:
         except OSError as exc:
             self.note = "no line to %s:%d — %s" % (host, port, exc)
 
+        self.login()                      # the handshake belongs at connect time
         self.poller = Poller(host, web)
         self.poller.start()
 
@@ -105,15 +107,104 @@ class Machine:
         root.after(200, self.refresh)
 
     # -------------------------------------------------------------- plumbing
+    def login(self):
+        """Answer the operator prompt now, so the first command is not eaten."""
+        if not self.sock:
+            return
+        out, end = "", time.time() + 2.5
+        while time.time() < end:
+            ready, _, _ = select.select([self.sock], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                data = self.sock.recv(65536)
+            except (BlockingIOError, OSError):
+                return
+            if not data:
+                return
+            out += data.decode("latin-1")
+            if "OPERATOR ID" in out.upper():
+                try:
+                    self.sock.sendall(b"OPERATOR 1\n")
+                except OSError:
+                    return
+                time.sleep(0.25)
+                try:
+                    self.sock.recv(65536)      # the welcome line
+                except (BlockingIOError, OSError):
+                    pass
+                return
+            if "OPR>" in out:
+                return
+
     def submit(self, _e=None):
         line = self.entry.get().strip()
         self.entry.delete(0, "end")
-        if line and self.sock:
+        if not line:
+            return
+        if line.upper() in ("HELP", "?"):
+            self.show_help(self.fetch("HELP"))     # a sheet, not a line of text
+            return
+        if self.sock:
             try:
                 self.sock.sendall((line + "\n").encode("latin-1"))
             except OSError:
                 self.note = "the line dropped"
             self.read_socket()
+
+    def fetch(self, command, seconds=1.5):
+        """Send one command and collect the answer, for printing on paper."""
+        if not self.sock:
+            return "no line to the machine"
+        try:
+            self.sock.sendall((command + "\n").encode("latin-1"))
+        except OSError:
+            return "the line dropped"
+        out, end = "", time.time() + seconds
+        while time.time() < end:
+            ready, _, _ = select.select([self.sock], [], [], 0.15)
+            if not ready:
+                continue
+            try:
+                data = self.sock.recv(65536)
+            except (BlockingIOError, OSError):
+                break
+            if not data:
+                break
+            out += data.decode("latin-1")
+            if "OPR>" in out:
+                break
+        return out.replace("OPR>", "").strip("\r\n ")
+
+    def show_help(self, text):
+        """The manual, printed on a sheet of paper the length of the manual."""
+        if getattr(self, "help_win", None) is not None and self.help_win.winfo_exists():
+            self.help_win.lift()
+            return
+        text = (text or "the machine sent nothing back").replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.count("\n") + 1
+        cw = 880
+        chh = 46 + lines * 17 + 62        # 17px per line, plus air for the footer
+        win = tk.Toplevel(self.root)
+        win.title("operator's manual — SYS/370-145")
+        win.configure(bg=PAPER)
+        win.resizable(False, False)
+        win.geometry("%dx%d+90+70" % (cw, chh))
+        c = tk.Canvas(win, width=cw, height=chh, bg=PAPER, highlightthickness=0)
+        c.pack()
+        c.create_text(30, 24, anchor="w", fill=FADE, font=mono(10),
+                      text="N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L")
+        body = c.create_text(30, 46, anchor="nw", fill=INK, font=mono(11), justify="left",
+                             width=cw - 58,
+                             text=text or "the machine sent nothing back")
+        for y in range(30, chh - 10, 22):          # ruled paper, behind the ink
+            c.tag_lower(c.create_line(26, y, cw - 14, y, fill=PAPER_RULE))
+        for y in range(42, chh - 20, 22):
+            c.tag_lower(c.create_oval(10, y, 16, y + 6, fill=SHADOW, outline=""))
+        c.create_text(30, chh - 20, anchor="w", fill=FADE, font=mono(9),
+                      text="ESC closes this sheet")
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.help_win = win
 
     def read_socket(self):
         if not self.sock:
