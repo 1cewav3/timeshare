@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SELL LINES sells working lines only, and dead lines keep their identity.
+"""SELL, SCRAP and liquidation keep each fault on the unit it belongs to.
 
     python3 tools/sell_check.py
 """
@@ -41,6 +41,27 @@ checks.append(("the refusal points at SCRAP", "SCRAP" in msg))
 w = plant([])
 ok, _ = main.do_sell(w, ["LINES", "3"])
 checks.append(("plain sale still works", ok and w.lines == 5 and not w.faults))
+
+# scrap closes up the numbering the same way
+w = plant([3, 8])
+w.money = 100.0
+ok, _ = main.do_scrap(w, ["LINE", "3"])
+checks.append(("scrap line 3 leaves seven lines", ok and w.lines == 7))
+checks.append(("the old line 8 is now line 7", [f["n"] for f in w.faults_of("line")] == [7]))
+
+w = main.World(None)
+w.cores = 3
+w.add_fault("module", 1)
+w.add_fault("module", 3)
+ok, _ = main.do_scrap(w, ["MODULE", "1"])
+checks.append(("scrap module 1: the old module 3 is now 2",
+               ok and w.cores == 2 and [f["n"] for f in w.faults_of("module")] == [2]))
+
+# liquidation sells every line: no dead line survives it
+w = plant([3, 20])
+w.lines = 24
+w.liquidate()
+checks.append(("liquidation leaves no line faults", not w.faults_of("line")))
 
 bad = 0
 for name, ok in checks:

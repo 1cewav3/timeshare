@@ -544,6 +544,10 @@ class World:
                     + self.extra_slots * b["price_slot"]) * b["liquidation_rate"]
         self.money = max(0.0, self.money + proceeds)
         self.lines = b["start_lines"]
+        # every line was sold; the exchange's minimum set arrives working
+        self.faults = [f for f in self.faults if f["kind"] != "line"]
+        if self.db is not None:
+            self.db.execute("DELETE FROM fault WHERE kind='line'")
         self.extra_slots = 0
         # persist only what was sold. The old DELETE FROM upgrade also took
         # standing, prestiges, site, bodges and equipment off the save while
@@ -1261,15 +1265,19 @@ def do_sell(w, args):
                   % (n, what, proceeds, w.money, w.capacity, w.slots))
 
 
-def renumber_lines(w, gone):
-    """Lines run 1..lines with no gaps: close up the numbers that were removed,
-    so a dead line keeps pointing at the same physical line."""
-    for f in w.faults_of("line"):
+def renumber(w, kind, gone):
+    """Lines and modules run 1..n with no gaps: close up the numbers that were
+    removed, so each fault keeps pointing at the same physical unit."""
+    for f in w.faults_of(kind):
         f["n"] -= sum(1 for g in gone if g < f["n"])
     if w.db is not None:
-        w.db.execute("DELETE FROM fault WHERE kind='line'")
-        for f in w.faults_of("line"):
-            w.db.execute("INSERT INTO fault (kind, n) VALUES ('line', ?)", (f["n"],))
+        w.db.execute("DELETE FROM fault WHERE kind=?", (kind,))
+        for f in w.faults_of(kind):
+            w.db.execute("INSERT INTO fault (kind, n) VALUES (?, ?)", (kind, f["n"]))
+
+
+def renumber_lines(w, gone):
+    renumber(w, "line", gone)
 
 
 def _unit_args(w, args, verb):
@@ -1314,6 +1322,7 @@ def do_scrap(w, args):
         w.lines = max(0, w.lines - 1)
     else:
         w.cores = max(0, w.cores - 1)
+    renumber(w, kind, [n])
     w.journal("SCRAPPED %s %d FOR %.2f" % (kind.upper(), n, proceeds))
     return True, ("%s %d STRIPPED AND SOLD FOR %.2f. CASH %.2f. CAPACITY NOW %d."
                   % (kind.upper(), n, proceeds, w.money, w.capacity))
@@ -1580,7 +1589,7 @@ async def run_command(world, rng, lock, line, peer=None):
 
 def snapshot(world):
     """Everything the web page draws, computed from the same objects the terminal uses."""
-    price = C.BALANCE["building_price"]
+    price = world.goal_price            # grows with each prestige, as BUY BUILDING charges
     return {
         "tick": world.ticks,
         "cash": round(world.money, 2),
