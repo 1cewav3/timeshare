@@ -255,6 +255,8 @@ class Machine:
         c = self.c
         face = tkfont.Font(family="DejaVu Sans Mono", size=-11, weight="bold")
         self.body_chars = max(28, int((PX1 - PX0 - 52) / max(1, face.measure("M"))))
+        # printed lines that fit between the header and the rule above the goal
+        self.body_room = max(6, (H - 214 - 148) // 17)
         c.create_rectangle(6, 6, W - 6, H - 6, outline=RULE, fill=BG)
         for x, y in ((14, 14), (W - 14, 14), (14, H - 14), (W - 14, H - 14)):
             self.screw(x, y)
@@ -436,17 +438,20 @@ class Machine:
             s.get("tick", 0), "{:,.2f}".format(s.get("cash", 0.0)), net,
             working_lines, lines, served, turned))
 
-        room = 21                     # printed lines that fit above the goal block
+        room = self.body_room
         typed_rows = []
         for kind, text in list(self.log)[-14:]:
             row = ("› " + text) if kind == "cmd" else ("  " + text)
-            typed_rows.append(row[:self.body_chars])
+            if len(row) > self.body_chars:
+                row = row[:self.body_chars - 1] + "…"
+            typed_rows.append(row)
 
         news = []
         for line in (s.get("news") or [])[-6:]:
             if line not in news:
                 news.append(line)
-        journal = [n[:self.body_chars] for n in news] or ["N O   T R A F F I C   Y E T"]
+        journal = [(n[:self.body_chars - 1] + "…" if len(n) > self.body_chars else n)
+                   for n in news] or ["N O   T R A F F I C   Y E T"]
 
         body = []
         if typed_rows:
