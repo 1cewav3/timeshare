@@ -22,3 +22,7 @@ python3 tools/smoke.py 127.0.0.1 2023
 
 All the fiction and every number live in `content.py`. `main.py` is the
 engine; `tools/` are the checks that keep it honest.
+
+## license
+
+MIT. See `LICENSE`.
