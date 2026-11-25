@@ -1767,7 +1767,8 @@ async def serve(port, db_path, interval, web_port=0):
     world.load_faults()
     world.load_upgrades()
     world.load_contracts()
-    world.tick_seconds = interval
+    if interval:                 # only an explicit --tick overrides the saved rate
+        world.tick_seconds = interval
     rng = random.Random()
     lock = asyncio.Lock()
     with_lock = world.advance(time.time(), rng)
@@ -1783,7 +1784,7 @@ async def serve(port, db_path, interval, web_port=0):
             lambda r, w: web_handler(r, w, world, rng, lock), "0.0.0.0", web_port)
     ticker_task = asyncio.create_task(ticker(world, rng, lock, interval))
     print("timeshare up on port %d, state %s, tick %ds"
-          % (port, db_path or "(memory only)", interval), flush=True)
+          % (port, db_path or "(memory only)", world.tick_seconds), flush=True)
     if web_server:
         print("state at http://0.0.0.0:%d/state" % web_port, flush=True)
     async with server:
@@ -1925,7 +1926,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=2023)
     ap.add_argument("--db", default=os.path.expanduser("~/timeshare/timeshare.db"))
-    ap.add_argument("--tick", type=int, default=TICK_SECONDS)
+    ap.add_argument("--tick", type=int, default=None,
+                    help="seconds per tick (default: the rate saved with the world)")
     ap.add_argument("--web", type=int, default=0,
                     help="port for the browser board (0 = off, e.g. --web 2024)")
     ap.add_argument("--sim", type=int, metavar="TICKS")

@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import textwrap
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -154,16 +155,14 @@ class Machine:
         self.log.append(("cmd", line))
         answer = self.fetch(line, seconds=2.0)
         for row in answer.splitlines():
-            if row.strip():
-                self.log.append(("out", row.strip()))
+            self.log.append(("out", row.rstrip()))   # the engine's columns are the layout
         self.read_socket()
 
     def set_tick(self, seconds):
         line = "tick %d" % seconds
         self.log.append(("cmd", line))
         for row in self.fetch(line, seconds=2.0).splitlines():
-            if row.strip():
-                self.log.append(("out", row.strip()))
+            self.log.append(("out", row.rstrip()))
 
     def fetch(self, command, seconds=1.5):
         """Send one command and collect the answer, for printing on paper."""
@@ -187,7 +186,8 @@ class Machine:
             out += data.decode("latin-1")
             if "OPR>" in out:
                 break
-        return out.replace("OPR>", "").strip("\r\n ")
+        # strip newlines only: the first line's indent is part of the layout
+        return out.replace("OPR>", "").strip("\r\n")
 
     def show_help(self, text):
         """The manual, printed on a sheet of paper the length of the manual."""
@@ -196,13 +196,15 @@ class Machine:
             return
         text = (text or "the machine sent nothing back").replace("\r\n", "\n").replace("\r", "\n")
         lines = text.count("\n") + 1
+        pitch = getattr(self, "pitch", 18)
         cw = 880
-        chh = 46 + lines * 17 + 62        # 17px per line, plus air for the footer
+        chh = 46 + lines * pitch + 44     # measured pitch, plus air for the footer
+        top = max(0, min(70, self.root.winfo_screenheight() - chh - 40))
         win = tk.Toplevel(self.root)
         win.title("operator's manual — SYS/370-145")
         win.configure(bg=PAPER)
         win.resizable(False, False)
-        win.geometry("%dx%d+90+70" % (cw, chh))
+        win.geometry("%dx%d+90+%d" % (cw, chh, top))
         c = tk.Canvas(win, width=cw, height=chh, bg=PAPER, highlightthickness=0)
         c.pack()
         c.create_text(30, 24, anchor="w", fill=FADE, font=mono(10),
@@ -210,7 +212,7 @@ class Machine:
         body = c.create_text(30, 46, anchor="nw", fill=INK, font=mono(11), justify="left",
                              width=cw - 58,
                              text=text or "the machine sent nothing back")
-        for y in range(30, chh - 10, 22):          # ruled paper, behind the ink
+        for y in range(46 - 1 + pitch, chh - 30, pitch):   # ruled paper, under each line
             c.tag_lower(c.create_line(26, y, cw - 14, y, fill=PAPER_RULE))
         for y in range(42, chh - 20, 22):
             c.tag_lower(c.create_oval(10, y, 16, y + 6, fill=SHADOW, outline=""))
@@ -254,9 +256,14 @@ class Machine:
     def build(self):
         c = self.c
         face = tkfont.Font(family="DejaVu Sans Mono", size=-11, weight="bold")
+        head = tkfont.Font(family="DejaVu Sans Mono", size=-12, weight="bold")
         self.body_chars = max(28, int((PX1 - PX0 - 52) / max(1, face.measure("M"))))
+        # measured, not guessed: tk scales even pixel sizes on this display, so
+        # the rules, the line budget and the help window all use the real pitch
+        self.pitch = max(1, face.metrics("linespace"))
+        body_y = 96 + 3 * head.metrics("linespace") + self.pitch // 2
         # printed lines that fit between the header and the rule above the goal
-        self.body_room = max(6, (H - 214 - 148) // 17)
+        self.body_room = max(6, (H - 216 - body_y) // self.pitch)
         c.create_rectangle(6, 6, W - 6, H - 6, outline=RULE, fill=BG)
         for x, y in ((14, 14), (W - 14, 14), (14, H - 14), (W - 14, H - 14)):
             self.screw(x, y)
@@ -324,11 +331,12 @@ class Machine:
         # ---- the sheet of paper
         c.create_rectangle(PX0 + 3, 59, PX1 + 3, H - 59, fill=SHADOW, outline="")
         c.create_rectangle(PX0, 56, PX1, H - 62, fill=PAPER, outline=SHADOW)
-        for i in range(1, 26):
-            y = 56 + i * 22
-            if y > H - 70:
-                break
+        y = body_y - 1 + self.pitch            # each rule sits under a printed line
+        while y - self.pitch > 60:
+            y -= self.pitch
+        while y <= H - 70:
             c.create_line(PX0 + 26, y, PX1 - 12, y, fill=PAPER_RULE)
+            y += self.pitch
         for i in range(24):
             y = 70 + i * 22
             if y > H - 74:
@@ -339,7 +347,7 @@ class Machine:
                                     text="NORTHGATE  TELEPRINTER   6 LPI")
         self.p_main = c.create_text(PX0 + 30, 96, anchor="nw", fill=INK, font=mono(12),
                                     text="", width=PX1 - PX0 - 50, justify="left")
-        self.p_body = c.create_text(PX0 + 30, 148, anchor="nw", fill=INK, font=mono(11),
+        self.p_body = c.create_text(PX0 + 30, body_y, anchor="nw", fill=INK, font=mono(11),
                                     text="", width=PX1 - PX0 - 50, justify="left")
         c.create_line(PX0 + 30, H - 208, PX1 - 24, H - 208, fill=FADE)
         self.goal_label = c.create_text(PX0 + 30, H - 190, anchor="w", fill=FADE,
@@ -355,6 +363,16 @@ class Machine:
         c.create_text(30, H - 28, anchor="w", fill=STENCIL, font=mono(13), text="O P R ›")
         self.note_text = c.create_text(W - 30, H - 28, anchor="e", fill=FADE,
                                        font=mono(10), text="")
+
+    def wrap(self, row):
+        """Fold a line to the sheet's width, continuing under its own indent."""
+        if len(row) <= self.body_chars:
+            return [row]
+        if len(set(row.strip())) == 1:          # a rule of dashes is cut, not folded
+            return [row[:self.body_chars]]
+        lead = len(row) - len(row.lstrip())
+        return textwrap.wrap(row, self.body_chars, subsequent_indent=" " * (lead + 2),
+                             break_long_words=True) or [row[:self.body_chars]]
 
     # --------------------------------------------------------------- painting
     def refresh(self):
@@ -446,11 +464,15 @@ class Machine:
         if last >= 0:
             shown = []
             for kind, text in rows[last:]:
-                row = ("› " + text) if kind == "cmd" else ("  " + text)
-                if len(row) > self.body_chars:
-                    row = row[:self.body_chars - 1] + "…"
-                shown.append(row)
-            body = shown[:room]
+                row = ("› " + text) if kind == "cmd" else text
+                shown.extend(self.wrap(row))
+            while len(shown) > 1 and not shown[-1].strip():
+                shown.pop()
+            if len(shown) > room:
+                cut = len(shown) - room + 1
+                shown = shown[:room - 1] + ["  … %d MORE LINE%s NOT PRINTED"
+                                            % (cut, "" if cut == 1 else "S")]
+            body = shown
         else:
             body = ["N O   C O M M A N D   Y E T", "",
                     "TYPE HELP FOR THE MANUAL, OR STATUS FOR THE SYSTEM REPORT."]
