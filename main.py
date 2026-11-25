@@ -257,7 +257,7 @@ class World:
         if self.db is None:
             return
         row = self.db.execute(
-            "SELECT money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode "
+            "SELECT money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode, tick_seconds "
             "FROM world WHERE id=1"
         ).fetchone()
         if row is None:
@@ -268,6 +268,8 @@ class World:
         self.queue = json.loads(row[8] or "[]")
         if row[9] in ("wall", "session"):
             self.mode = row[9]
+        if row[10]:
+            self.tick_seconds = int(row[10])
         if not self.subs:
             self.subs = int(self.demand)
         self.rep_trend = 0.0
@@ -291,14 +293,15 @@ class World:
         if self.db is None:
             return
         self.db.execute(
-            "INSERT INTO world (id, money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode) "
-            "VALUES (1,?,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO world (id, money, cores, lines, subs, rep, ticks, last_tick, tier, queue, mode, tick_seconds) "
+            "VALUES (1,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET money=excluded.money, cores=excluded.cores, "
             "lines=excluded.lines, subs=excluded.subs, rep=excluded.rep, ticks=excluded.ticks, "
             "last_tick=excluded.last_tick, tier=excluded.tier, queue=excluded.queue, "
-            "mode=excluded.mode",
+            "mode=excluded.mode, tick_seconds=excluded.tick_seconds",
             (self.money, self.cores, self.lines, self.subs, self.rep,
-             self.ticks, self.last_tick, self.tier, json.dumps(self.queue), self.mode),
+             self.ticks, self.last_tick, self.tier, json.dumps(self.queue), self.mode,
+             self.tick_seconds),
         )
 
     def journal(self, line):
@@ -745,6 +748,23 @@ def do_mode(w, args):
                       "NO TICKS PASS WHILE THE LINES ARE QUIET.")
     return True, ("THE MACHINE NOW RUNS ON THE CLOCK. IT KEEPS GOING "
                   "WHILE NOBODY IS DIALLED IN.")
+
+
+def do_tick_rate(w, args):
+    """Returns (ok, message)."""
+    if not args:
+        return False, "USAGE: TICK n   (seconds per tick, 1 to 3600)"
+    try:
+        n = int(args[0])
+    except ValueError:
+        return False, "SECONDS MUST BE A WHOLE NUMBER."
+    if not 1 <= n <= 3600:
+        return False, "THE CLOCK RUNS BETWEEN 1 AND 3600 SECONDS A TICK."
+    w.tick_seconds = n
+    w.last_tick = int(time.time())      # the change never banks a gap
+    w.journal("TICK RATE SET TO %d SECONDS" % n)
+    return True, ("THE CLOCK NOW TURNS EVERY %d SECOND%s."
+                  % (n, "" if n == 1 else "S"))
 
 
 def r_upgrades(w):
@@ -1345,6 +1365,16 @@ async def run_command(world, rng, lock, line, peer=None):
         out = C.HELP
     elif cmd == "STATUS":
         out = r_status(world)
+    elif cmd == "TICK":
+        if len(parts) > 1:
+            async with lock:
+                ok, msg = do_tick_rate(world, parts[1:])
+                world.save()
+            out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+        else:
+            out = ("\r\n  THE CLOCK TURNS EVERY %d SECOND%s.\r\n"
+                   "  TICK n SETS IT (1 TO 3600).\r\n\r\n"
+                   % (world.tick_seconds, "" if world.tick_seconds == 1 else "S"))
     elif cmd == "MODE":
         if len(parts) > 1:
             async with lock:
@@ -1495,6 +1525,8 @@ def snapshot(world):
         "upgrades": sorted(world.owned),
         "history": [(t, round(m, 1), round(n, 3)) for t, m, n in world.history[-180:]],
         "news": world.queue[-14:],
+        "tick_seconds": world.tick_seconds,
+        "to_next": max(0, int(world.tick_seconds - (time.time() - world.last_tick))),
     }
 
 
@@ -1610,7 +1642,7 @@ async def ticker(world, rng, lock, interval):
     (or the process being down) never loses one: advance() back-fills.
     """
     while True:
-        await asyncio.sleep(min(interval, 5))
+        await asyncio.sleep(min(world.tick_seconds, 5))
         async with lock:
             n = world.advance(time.time(), rng)
             if n:
@@ -1629,11 +1661,12 @@ async def serve(port, db_path, interval, web_port=0):
             id INTEGER PRIMARY KEY CHECK (id=1),
             money REAL, cores INTEGER, lines INTEGER, subs INTEGER,
             rep REAL, ticks INTEGER, last_tick INTEGER, tier INTEGER, queue TEXT,
-            mode TEXT)""")
-        try:                      # databases made before the mode column existed
-            db.execute("ALTER TABLE world ADD COLUMN mode TEXT")
-        except sqlite3.OperationalError:
-            pass
+            mode TEXT, tick_seconds INTEGER)""")
+        for column in ("mode TEXT", "tick_seconds INTEGER"):
+            try:                  # databases made before the column existed
+                db.execute("ALTER TABLE world ADD COLUMN " + column)
+            except sqlite3.OperationalError:
+                pass
         db.execute("CREATE TABLE IF NOT EXISTS log(id INTEGER PRIMARY KEY AUTOINCREMENT, tick INTEGER, line TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS fault(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS upgrade(name TEXT PRIMARY KEY, n INTEGER)")

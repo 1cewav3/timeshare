@@ -63,6 +63,7 @@ class Poller(threading.Thread):
         super().__init__(daemon=True)
         self.url = "http://%s:%d/state" % (host, port)
         self.state = {}
+        self.fetched = 0.0
         self.stop = False
 
     def run(self):
@@ -70,6 +71,7 @@ class Poller(threading.Thread):
             try:
                 with urllib.request.urlopen(self.url, timeout=2) as r:
                     self.state = json.loads(r.read().decode())
+                    self.fetched = time.time()
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 pass
             threading.Event().wait(0.5)
@@ -155,6 +157,13 @@ class Machine:
             if row.strip():
                 self.log.append(("out", row.strip()))
         self.read_socket()
+
+    def set_tick(self, seconds):
+        line = "tick %d" % seconds
+        self.log.append(("cmd", line))
+        for row in self.fetch(line, seconds=2.0).splitlines():
+            if row.strip():
+                self.log.append(("out", row.strip()))
 
     def fetch(self, command, seconds=1.5):
         """Send one command and collect the answer, for printing on paper."""
@@ -251,11 +260,21 @@ class Machine:
             self.screw(x, y)
 
         c.create_text(26, 26, anchor="w", fill=STENCIL, font=mono(12),
-                      text="N O R T H G A T E   C O M P U T E R   S E R V I C E S")
-        c.create_text(W - 196, 26, anchor="e", fill=STENCIL, font=mono(11),
-                      text="SYS/370-145")
+                      text="N O R T H G A T E")
         c.create_text(W - 26, 26, anchor="e", fill=STENCIL, font=mono(11),
-                      text="S E P   1 9 7 9")
+                      text="S Y S / 3 7 0 - 1 4 5")
+        c.create_rectangle(240, 21, 430, 31, fill=PANEL, outline=RULE)
+        self.tick_fill = c.create_rectangle(241, 22, 241, 30, fill=LAMP, outline="")
+        self.tick_label = c.create_text(438, 26, anchor="w", fill=STENCIL,
+                                        font=mono(10), text="")
+        self.tick_buttons = {}
+        for i, secs in enumerate((1, 3, 10, 60)):
+            x = 600 + i * 40
+            rect = c.create_rectangle(x, 17, x + 34, 35, fill=PANEL, outline=RULE)
+            txt = c.create_text(x + 17, 26, text=str(secs), fill=STENCIL, font=mono(10))
+            for item in (rect, txt):
+                c.tag_bind(item, "<Button-1>", lambda _e, n=secs: self.set_tick(n))
+            self.tick_buttons[secs] = (rect, txt)
         c.create_line(26, 40, W - 26, 40, fill=RULE)
 
         # ---- module rack
@@ -438,6 +457,17 @@ class Machine:
         body += ["J O U R N A L", ""]
         body += journal[:max(1, room - len(body))]
         c.itemconfigure(self.p_body, text="\n".join(body[:room]))
+
+        ts = float(s.get("tick_seconds") or 60)
+        stale = time.time() - getattr(self.poller, "fetched", time.time())
+        remaining = max(0.0, min(ts, float(s.get("to_next", 0)) - stale))
+        span = 430 - 241
+        c.coords(self.tick_fill, 241, 22, 241 + int(span * (1 - remaining / ts)), 30)
+        c.itemconfigure(self.tick_label, text="%ds  ·  next in %ds" % (int(ts), int(remaining + 0.9)))
+        for secs, (rect, txt) in self.tick_buttons.items():
+            active = abs(secs - ts) < 0.5
+            c.itemconfigure(rect, fill=LAMP if active else PANEL, outline=RULE)
+            c.itemconfigure(txt, fill=BG if active else STENCIL)
 
         goal = s.get("goal") or {}
         gpct = max(0.0, min(100.0, float(goal.get("pct", 0))))

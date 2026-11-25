@@ -44,6 +44,7 @@ COMMANDS
   MODE            which clock drives the world
   MODE WALL       the machine runs even with nobody dialled in
   MODE SESSION    the machine only runs while someone is on
+  TICK n          seconds per tick (1 to 3600), saved with the world
   BUY BUILDING    buy the building that houses the machine (ends the game)
   OFFERS          work offered to you, with a deadline and a penalty
   ACCEPT n        take offer n (up to 3 at once)
