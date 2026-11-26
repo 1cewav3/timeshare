@@ -107,6 +107,10 @@ class Machine:
         root.resizable(False, False)
         self.poller = Board()                     # refreshed from the session each frame
         self.closing = False
+        if root.winfo_screenheight() < H + 120:
+            # a 1366x768 laptop: the window and its title bar only just fit
+            # above the taskbar, so open it at the top, where the prompt shows
+            root.geometry("+%d+0" % max(0, (root.winfo_screenwidth() - W) // 2))
 
         self.c = tk.Canvas(root, width=W, height=H, bg=BG, highlightthickness=0)
         self.c.pack()
