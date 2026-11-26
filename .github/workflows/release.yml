@@ -83,7 +83,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           body_path: notes.md
-          files: artifacts/*/release/timeshare-*
+          files: artifacts/*/timeshare-*
 
       - name: itch.io (only if BUTLER_API_KEY and the ITCH_GAME variable are set)
         env:
@@ -97,7 +97,7 @@ jobs:
           unzip -q butler.zip -d butler && chmod +x butler/butler
           v=${GITHUB_REF_NAME#v}
           # unpack each archive and push it to the itch channel for its platform
-          for f in artifacts/*/release/timeshare-*; do
+          for f in artifacts/*/timeshare-*; do
             case "$f" in
               *windows*) channel=windows ;;
               *linux*) channel=linux ;;
