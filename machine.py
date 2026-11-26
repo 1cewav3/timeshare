@@ -122,14 +122,12 @@ class Machine:
             root.bind_all(key, lambda _e, d=step: self.show_rack(self.rack + d))
         self.entry.focus_set()
 
-        if root.winfo_screenheight() < H + 120:
+        if sys.platform != "darwin" and root.winfo_screenheight() < H + 120:
             # a 1366x768 laptop: the window and its title bar only just fit
             # above the taskbar, so open it at the top, where the prompt shows.
-            # Placed once the contents exist, and with its size stated: macOS
-            # otherwise fixes the window at Tk's default 200 by 200.
-            root.update_idletasks()
-            root.geometry("%dx%d+%d+0" % (root.winfo_reqwidth(), root.winfo_reqheight(),
-                                          max(0, (root.winfo_screenwidth() - W) // 2)))
+            # Not on macOS, which has no taskbar to clear and shrank the
+            # window to 200 by 200 when it was placed like this.
+            root.geometry("%dx%d+%d+0" % (W, H, max(0, (root.winfo_screenwidth() - W) // 2)))
 
         root.after(200, self.refresh)
 
