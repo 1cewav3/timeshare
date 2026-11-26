@@ -29,8 +29,11 @@ if run.returncode != 0:
 tmp = tempfile.mkdtemp()
 db = os.path.join(tmp, "check.db")
 env = dict(os.environ, TIMESHARE_DIAG="1")
-game = subprocess.Popen([exe, "--db", db], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, env=env)
+# output goes to a file, not a pipe: on Windows a one-file build is a launcher
+# and the game under it, and a game left running would hold a pipe open forever
+said_path = os.path.join(tmp, "said.txt")
+said_file = open(said_path, "w")
+game = subprocess.Popen([exe, "--db", db], stdout=said_file, stderr=subprocess.STDOUT, env=env)
 time.sleep(8)
 alive = game.poll() is None
 try:
@@ -40,13 +43,19 @@ try:
     print("screenshot", shot)
 except Exception as exc:                 # a missing screenshot is not a failed build
     print("no screenshot:", exc)
-game.terminate()
+if os.name == "nt":
+    # stop the launcher and the game under it together
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(game.pid)], capture_output=True)
+else:
+    game.terminate()
 try:
-    said, _ = game.communicate(timeout=10)
+    game.wait(timeout=15)
 except subprocess.TimeoutExpired:
     game.kill()
-    said, _ = game.communicate()
-print("the game said:", (said or "").strip()[-600:] or "(nothing)")
+    game.wait(timeout=15)
+said_file.close()
+said = open(said_path, errors="replace").read()
+print("the game said:", said.strip()[-600:] or "(nothing)")
 crash = os.path.join(tmp, "timeshare-crash.log")
 if os.path.exists(crash):
     print(open(crash).read())

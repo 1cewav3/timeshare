@@ -25,6 +25,7 @@ jobs:
           - os: ubuntu-22.04          # an older glibc runs on more distributions
             itch: linux
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20                 # a build takes a few minutes; a hang should not take hours
     continue-on-error: ${{ matrix.optional == true }}
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +64,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
