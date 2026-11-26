@@ -128,6 +128,18 @@ class Machine:
             # Not on macOS, which has no taskbar to clear and shrank the
             # window to 200 by 200 when it was placed like this.
             root.geometry("%dx%d+%d+0" % (W, H, max(0, (root.winfo_screenwidth() - W) // 2)))
+        elif sys.platform == "darwin":
+            # on a Mac screen narrower than the window, Tk falls back to its
+            # default 200 by 200; stating the size keeps the whole window
+            root.geometry("%dx%d" % (W, H))
+        if os.environ.get("TIMESHARE_DIAG"):
+            # the release check asks: what screen, what window, what was asked for
+            root.after(3000, lambda: print(
+                "DIAG screen %dx%d window %dx%d at %d,%d requested %dx%d scaling %.3f font %s"
+                % (root.winfo_screenwidth(), root.winfo_screenheight(), root.winfo_width(),
+                   root.winfo_height(), root.winfo_x(), root.winfo_y(), root.winfo_reqwidth(),
+                   root.winfo_reqheight(), float(root.tk.call("tk", "scaling")), FAMILY),
+                flush=True))
 
         root.after(200, self.refresh)
 

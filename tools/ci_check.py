@@ -28,7 +28,9 @@ if run.returncode != 0:
 
 tmp = tempfile.mkdtemp()
 db = os.path.join(tmp, "check.db")
-game = subprocess.Popen([exe, "--db", db])
+env = dict(os.environ, TIMESHARE_DIAG="1")
+game = subprocess.Popen([exe, "--db", db], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, env=env)
 time.sleep(8)
 alive = game.poll() is None
 try:
@@ -40,9 +42,11 @@ except Exception as exc:                 # a missing screenshot is not a failed 
     print("no screenshot:", exc)
 game.terminate()
 try:
-    game.wait(timeout=10)
+    said, _ = game.communicate(timeout=10)
 except subprocess.TimeoutExpired:
     game.kill()
+    said, _ = game.communicate()
+print("the game said:", (said or "").strip()[-600:] or "(nothing)")
 crash = os.path.join(tmp, "timeshare-crash.log")
 if os.path.exists(crash):
     print(open(crash).read())
