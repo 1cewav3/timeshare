@@ -22,7 +22,7 @@ jobs:
         include:
           - os: windows-latest
             itch: windows
-          - os: macos-14              # Apple Silicon
+          - os: macos-latest          # Apple Silicon (GitHub's current macOS)
             itch: mac
           - os: macos-15-intel        # Intel Macs, while GitHub still offers them
             itch: mac-intel
