@@ -12,11 +12,6 @@ STARTING THE GAME
             If Windows says it "protected your PC", click "More info",
             then "Run anyway". The game is not signed, that is all.
 
-  macOS     Drag TIMESHARE into your Applications folder if you like.
-            The first time, RIGHT-click it (or Control-click) and choose
-            Open, then Open again. After that a double-click is enough.
-            (The game is not signed by Apple, so macOS asks once.)
-
   Linux     Double-click TIMESHARE, or run ./TIMESHARE in a terminal.
             If it will not start, make it executable: chmod +x TIMESHARE
 
@@ -36,7 +31,6 @@ PLAYING
 YOUR SAVE
 
   Windows   %APPDATA%\Timeshare\timeshare.db
-  macOS     ~/Library/Application Support/Timeshare/timeshare.db
   Linux     ~/.local/share/Timeshare/timeshare.db
 
   Delete that file to start a new bureau from scratch.

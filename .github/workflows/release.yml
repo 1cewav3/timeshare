@@ -1,4 +1,4 @@
-# Builds the game for Windows, macOS and Linux, checks each build the way a
+# Builds the game for Windows and Linux, checks each build the way a
 # player meets it, and on a version tag (v0.1.0) publishes them: a GitHub
 # release with the archives, and, if an itch.io key is set, the itch page.
 #
@@ -22,11 +22,6 @@ jobs:
         include:
           - os: windows-latest
             itch: windows
-          - os: macos-latest          # Apple Silicon (GitHub's current macOS)
-            itch: mac
-          - os: macos-15-intel        # Intel Macs, while GitHub still offers them
-            itch: mac-intel
-            optional: true
           - os: ubuntu-22.04          # an older glibc runs on more distributions
             itch: linux
     runs-on: ${{ matrix.os }}
@@ -99,13 +94,10 @@ jobs:
           curl -sL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
           unzip -q butler.zip -d butler && chmod +x butler/butler
           v=${GITHUB_REF_NAME#v}
-          # unpack each archive (unzip and tar keep the macOS app's permissions
-          # and links) and push it to the itch channel for its platform
+          # unpack each archive and push it to the itch channel for its platform
           for f in artifacts/*/release/timeshare-*; do
             case "$f" in
               *windows*) channel=windows ;;
-              *macos-arm64*) channel=mac ;;
-              *macos-x86_64*) channel=mac-intel ;;
               *linux*) channel=linux ;;
               *) continue ;;
             esac

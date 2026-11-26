@@ -1,6 +1,6 @@
 # Releasing
 
-A release is a version tag. GitHub builds the game on Windows, macOS and Linux,
+A release is a version tag. GitHub builds the game on Windows and Linux,
 checks each build, and publishes them on the repository's Releases page. If an
 itch.io key is set up, the same builds go to the itch page too.
 
@@ -19,13 +19,11 @@ itch.io key is set up, the same builds go to the itch page too.
 4. Watch the **Actions** tab. Each platform builds, runs its selftest, opens
    its window on a fresh save, and takes a screenshot. The screenshots are in
    the run's artifacts: look at them before telling anyone.
-5. The **Releases** page then has `v0.1.0` with four downloads:
+5. The **Releases** page then has `v0.1.0` with two downloads:
 
    | File | For |
    |---|---|
    | `timeshare-0.1.0-windows-x86_64.zip` | Windows 10 and 11 |
-   | `timeshare-0.1.0-macos-arm64.zip` | Macs with Apple Silicon (M1 and later) |
-   | `timeshare-0.1.0-macos-x86_64.zip` | Intel Macs (built while GitHub still offers Intel runners) |
    | `timeshare-0.1.0-linux-x86_64.tar.gz` | 64-bit Linux |
 
 To build and check without publishing, run the workflow by hand: Actions,
@@ -36,8 +34,8 @@ release, Run workflow. Nothing is published unless the run is for a tag.
 ### By hand
 
 On the game's itch page: Edit game, Uploads, Upload files. Upload the four
-archives from the release, and tick the platform for each (Windows, macOS,
-Linux; both Mac files are macOS). Set the kind of project to "Downloadable".
+archives from the release, and tick the platform for each (Windows, Linux).
+Set the kind of project to "Downloadable".
 
 ### Automatically
 
@@ -46,7 +44,7 @@ Linux; both Mac files are macOS). Set the kind of project to "Downloadable".
    - New repository **secret** `BUTLER_API_KEY`: the key.
    - New repository **variable** `ITCH_GAME`: `your-itch-name/timeshare`.
 3. Every release tag then also pushes to itch, one channel per platform
-   (`windows`, `mac`, `mac-intel`, `linux`), so the itch app can install and
+   (`windows`, `linux`), so the itch app can install and
    update the game.
 
 ## Building on your own machine
@@ -64,5 +62,12 @@ python3 -m venv .venv && .venv/bin/pip install pyinstaller pillow
 - `python3 tools/balance_check.py` (slow): the balance still has its shape.
 - Play a fresh bureau for ten minutes on the build itself, not from source.
 - Unsigned builds: Windows shows "Windows protected your PC" (More info, Run
-  anyway); macOS asks once (right-click, Open). The READ ME in each archive
-  says so. Signing needs paid certificates and can come later.
+  anyway). The READ ME in each archive says so. Signing needs a paid
+  certificate and can come later.
+
+## macOS
+
+Not shipped for now: on a Mac whose screen is narrower than the window, Tk
+opened it at 200 by 200. `tools/build.py` still builds an .app; to bring macOS
+back, put `macos-latest` (and `macos-15-intel`) back in the workflow's matrix
+and the channel lines in its itch step, and check the screenshots.

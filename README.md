@@ -26,7 +26,6 @@ The save lives in the usual place for app data:
 | | |
 |---|---|
 | Windows | `%APPDATA%\Timeshare\timeshare.db` |
-| macOS | `~/Library/Application Support/Timeshare/timeshare.db` |
 | Linux | `~/.local/share/Timeshare/timeshare.db` |
 
 A save from an older version in `~/timeshare/` is used where it is. Only one
@@ -70,7 +69,7 @@ engine; `tools/` are the checks that keep it honest.
 
 ## releasing
 
-See [RELEASING.md](RELEASING.md): a version tag builds Windows, macOS and Linux
+See [RELEASING.md](RELEASING.md): a version tag builds Windows and Linux
 on GitHub and publishes them.
 
 ## license
