@@ -8,3 +8,5 @@ archive/
 *.log
 docs/previews/
 *.zip
+build/
+release/

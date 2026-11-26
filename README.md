@@ -1,29 +1,43 @@
 # timeshare
 
-A fake 1979 timesharing operator, played over a socket. You buy dial-in
-lines, cores and tape, hire staff, sell batch slots, and try to keep the
-books positive while the machine ages and things break.
+A fake 1979 timesharing bureau, in one window. You buy dial-in lines and
+processing modules, hire staff, take contracts, answer what the day throws at
+you, and keep the books positive while the machine ages and things break.
 
-## run
+## play
+
+Download the file for your system from the
+[Releases page](https://github.com/1cewav3/timeshare/releases) (or the itch.io
+page), unpack it, and start TIMESHARE. Nothing to install; the READ ME inside
+says how on each system.
+
+## run from source
 
 ```
-python3 machine.py                        # starts the world and opens the window
-python3 machine.py --db /tmp/demo.db --tick 3
-python3 play.py                           # plain terminal client, same world
+python3 machine.py                        # play
+python3 machine.py --db /tmp/demo.db      # play a different save
 ```
 
-`machine.py` alone is enough: if no world answers on the command port it
-starts one, and closing the window stops it again. Add `--port`, `--web`,
-`--db` or `--tick` to point it at a different world.
+One window, single player. The world runs inside the game's own process: it
+opens no network ports and needs no server. Stdlib only, no install step.
 
-Stdlib only. No install step.
+The save lives in the usual place for app data:
+
+| | |
+|---|---|
+| Windows | `%APPDATA%\Timeshare\timeshare.db` |
+| macOS | `~/Library/Application Support/Timeshare/timeshare.db` |
+| Linux | `~/.local/share/Timeshare/timeshare.db` |
+
+A save from an older version in `~/timeshare/` is used where it is. Only one
+window can have a save open at a time.
 
 ## world clock
 
-The world runs on the clock whether or not anyone is dialled in, and catches
-up when you come back: the sheet opens on a report of what happened while you
-were gone (`AWAY` prints it again). If you would rather it only moved while you are
-playing:
+The world keeps time while the game is closed. When you come back the window
+catches up on what you missed, then opens on a report of what happened while
+you were gone (`AWAY` prints it again). If you would rather it only moved while
+the game is open:
 
 ```
 MODE SESSION
@@ -33,10 +47,13 @@ MODE SESSION
 
 ## checks
 
+The socket checks need the developer's server, which the game itself never
+starts. It listens on this machine only:
+
 ```
 python3 main.py --port 2099 --db /tmp/test.db --tick 1 &   # a throwaway world
 python3 tools/smoke.py 127.0.0.1 2099 --force
-for t in away lesson statement incident site plant business sell liquidate tycoon contract goal rep; do
+for t in session away lesson statement incident site plant business sell liquidate tycoon contract goal rep; do
     python3 tools/${t}_check.py
 done
 ```
@@ -50,6 +67,11 @@ investment pays over three weeks, and doing nothing ends in liquidation.
 
 All the fiction and every number live in `content.py`. `main.py` is the
 engine; `tools/` are the checks that keep it honest.
+
+## releasing
+
+See [RELEASING.md](RELEASING.md): a version tag builds Windows, macOS and Linux
+on GitHub and publishes them.
 
 ## license
 

@@ -1,0 +1,47 @@
+TIMESHARE {version}
+===============
+
+A fake 1979 timesharing bureau. You run the machine: buy dial-in lines and
+processing modules, take on staff and contracts, answer what the day throws at
+you, and keep the books positive while the hardware ages and things break.
+
+
+STARTING THE GAME
+
+  Windows   Double-click TIMESHARE.exe.
+            If Windows says it "protected your PC", click "More info",
+            then "Run anyway". The game is not signed, that is all.
+
+  macOS     Drag TIMESHARE into your Applications folder if you like.
+            The first time, RIGHT-click it (or Control-click) and choose
+            Open, then Open again. After that a double-click is enough.
+            (The game is not signed by Apple, so macOS asks once.)
+
+  Linux     Double-click TIMESHARE, or run ./TIMESHARE in a terminal.
+            If it will not start, make it executable: chmod +x TIMESHARE
+
+
+PLAYING
+
+  Type commands at the  O P R ›  prompt and press Enter.
+  HELP opens the operator's manual. BUY opens the order form,
+  SETTINGS the clock and the price, STAFF and BANK their own sheets.
+  Your first few offers teach the game; they pay whether you take them or not.
+
+  The bureau keeps running while the game is closed. When you come back
+  it catches up and tells you what happened while you were away.
+  (SETTINGS can make it stop while the game is closed instead.)
+
+
+YOUR SAVE
+
+  Windows   %APPDATA%\Timeshare\timeshare.db
+  macOS     ~/Library/Application Support/Timeshare/timeshare.db
+  Linux     ~/.local/share/Timeshare/timeshare.db
+
+  Delete that file to start a new bureau from scratch.
+  If something goes wrong, a file called timeshare-crash.log appears
+  next to the save; please send it along with your report.
+
+
+The game is single player and does not use the network.

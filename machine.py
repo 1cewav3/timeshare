@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
-"""The machine, as its own window.
+"""TIMESHARE: the machine, in one window.
 
-    python3 machine.py                      # game on 127.0.0.1:2023, board on :2024
-    python3 machine.py host port webport
+    python3 machine.py                      # play; the save lives in the usual place
+    python3 machine.py --db /tmp/demo.db    # a different save
 
-Two connections, each doing one job: a socket session carries commands and makes
-you present, and /state supplies every number drawn here. Nothing on the canvas
-is invented — if the engine does not report it, it is not shown.
+The world runs inside this window's own process: nothing listens on the network.
+Commands go straight to the engine, and every number drawn here comes from the
+engine's snapshot. Nothing on the canvas is invented — if the engine does not
+report it, it is not shown.
 """
-import atexit
 import collections
-import math
-import hashlib
-import time
 import json
+import math
 import os
-import select
 import signal
-import socket
-import subprocess
 import sys
 import textwrap
-import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
-import urllib.error
-import urllib.request
+import tkinter.messagebox
+
+import main as engine
 
 # ------------------------------------------------------------------ palette
 BG = "#0b0d09"
@@ -51,7 +47,26 @@ W, H = 1180, 700
 RACK_MODULES, RACK_LINES = 8, 32   # one rack page: eight module slots, 32 line slots
 MAX_LAMPS = 26                     # the most callers any generation of module carries
 MAX_BOOST = 4                      # blue lamps drawn after a row before it says +n
-BUILD = time.strftime("build %m-%d %H:%M", time.localtime(os.path.getmtime(__file__)))
+BUILD = "v" + engine.VERSION
+FAMILY = "DejaVu Sans Mono"        # replaced by pick_font() with what this machine has
+# Monospace faces, best first. Menlo shares DejaVu's letter widths; Consolas is a
+# little narrower, so text only gains room. The layout measures what it gets.
+FONTS = ["DejaVu Sans Mono", "Menlo", "Consolas", "Liberation Mono", "Monaco",
+         "Lucida Console", "Courier New", "Courier"]
+
+
+def pick_font(root):
+    """Use the first monospace face this machine has. A face Tk does not have
+    is silently swapped for a proportional one, which wrecks every column."""
+    global FAMILY
+    have = set(tkfont.families(root))
+    FAMILY = next((f for f in FONTS if f in have), "TkFixedFont")
+
+
+def resource(name):
+    """A file shipped with the game, whether run from source or packaged."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 LOG = "/tmp/timeshare-launch.log"
 PX0, PX1 = 648, 1164          # paper sheet
 LX0, LX1 = 16, 632            # left column
@@ -64,50 +79,34 @@ def mono(size, bold=True):
     (1.778 on this display) and blows the layout apart. Negative means pixels,
     so the text keeps the size the coordinates were designed for.
     """
-    return ("DejaVu Sans Mono", -size, "bold" if bold else "normal")
+    return (FAMILY, -size, "bold" if bold else "normal")
 
 
-class Poller(threading.Thread):
-    def __init__(self, host, port):
-        super().__init__(daemon=True)
-        self.url = "http://%s:%d/state" % (host, port)
+class Board:
+    """The latest snapshot of the world, and when it was taken."""
+    def __init__(self):
         self.state = {}
         self.fetched = 0.0
         self.stop = False
 
-    def run(self):
-        while not self.stop:
-            try:
-                with urllib.request.urlopen(self.url, timeout=2) as r:
-                    state = json.loads(r.read().decode())
-                    # stamped inside the dict and swapped in whole, so the
-                    # painter never pairs a new to_next with an old read time
-                    state["_fetched"] = self.fetched = time.time()
-                    self.state = state
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-                pass
-            threading.Event().wait(0.5)
-
 
 class Machine:
-    def __init__(self, root, host, port, web):
+    def __init__(self, root, session):
         self.root = root
+        self.session = session
+        pick_font(root)
+        try:
+            self.icon = tk.PhotoImage(file=resource(os.path.join("assets", "icon.png")))
+            root.iconphoto(True, self.icon)
+        except (tk.TclError, OSError):
+            pass                                   # no icon is no reason to stop
         self.note = ""
         self.log = collections.deque(maxlen=40)   # what you typed, and what came back
         root.title("timeshare — SYS/370-145")
         root.configure(bg=BG)
         root.resizable(False, False)
-
-        self.sock = None
-        try:
-            self.sock = socket.create_connection((host, port), timeout=8)
-            self.sock.setblocking(False)
-        except OSError as exc:
-            self.note = "no line to %s:%d — %s" % (host, port, exc)
-
-        self.login()                      # the handshake belongs at connect time
-        self.poller = Poller(host, web)
-        self.poller.start()
+        self.poller = Board()                     # refreshed from the session each frame
+        self.closing = False
 
         self.c = tk.Canvas(root, width=W, height=H, bg=BG, highlightthickness=0)
         self.c.pack()
@@ -126,47 +125,6 @@ class Machine:
         root.after(200, self.refresh)
 
     # -------------------------------------------------------------- plumbing
-    def login(self):
-        """Answer the operator prompt now, so the first command is not eaten."""
-        if not self.sock:
-            return
-        out, end = "", time.time() + 2.5
-        while time.time() < end:
-            ready, _, _ = select.select([self.sock], [], [], 0.2)
-            if not ready:
-                continue
-            try:
-                data = self.sock.recv(65536)
-            except (BlockingIOError, OSError):
-                return
-            if not data:
-                return
-            out += data.decode("latin-1")
-            if "OPERATOR ID" in out.upper():
-                try:
-                    self.sock.sendall(b"OPERATOR 1\n")
-                except OSError:
-                    return
-                self.welcome(self.read_to_prompt(4.0))
-                return
-            if "OPR>" in out:
-                return
-
-    def read_to_prompt(self, seconds):
-        out, end = "", time.time() + seconds
-        while time.time() < end and "OPR>" not in out:
-            ready, _, _ = select.select([self.sock], [], [], 0.15)
-            if not ready:
-                continue
-            try:
-                data = self.sock.recv(65536)
-            except (BlockingIOError, OSError):
-                break
-            if not data:
-                break
-            out += data.decode("latin-1")
-        return out.replace("OPR>", "")
-
     def welcome(self, text):
         """The sheet opens on the away report, if the machine sent one.
 
@@ -217,9 +175,8 @@ class Machine:
             # the engine hangs up on these; leave the sign-off on the paper for
             # a moment, then close, which also stops a world this window started
             self.entry.configure(state="disabled")
-            self.root.after(1200, self.root.destroy)
+            self.root.after(1200, self.quit_soon)
             return
-        self.read_socket()
 
     def set_tick(self, seconds):
         line = "tick %d" % seconds
@@ -227,30 +184,14 @@ class Machine:
         for row in self.fetch(line, seconds=2.0).splitlines():
             self.log.append(("out", row.rstrip()))
 
-    def fetch(self, command, seconds=1.5):
-        """Send one command and collect the answer, for printing on paper."""
-        if not self.sock:
-            return "no line to the machine"
+    def fetch(self, command, seconds=None):
+        """Run one command on the engine and return its answer, for the paper."""
         try:
-            self.sock.sendall((command + "\n").encode("latin-1"))
-        except OSError:
-            return "the line dropped"
-        out, end = "", time.time() + seconds
-        while time.time() < end:
-            ready, _, _ = select.select([self.sock], [], [], 0.15)
-            if not ready:
-                continue
-            try:
-                data = self.sock.recv(65536)
-            except (BlockingIOError, OSError):
-                break
-            if not data:
-                break
-            out += data.decode("latin-1")
-            if "OPR>" in out:
-                break
+            out, _closing = self.session.command(command)
+        except Exception as exc:                   # a bug should not take the window down
+            return "  THE MACHINE FAULTED ON THAT COMMAND: %s" % exc
         # strip newlines only: the first line's indent is part of the layout
-        return out.replace("OPR>", "").strip("\r\n")
+        return out.replace("\r\n", "\n").strip("\n")
 
     def open_form(self, slot, title, heading, builder, watch=None):
         form = getattr(self, slot, None)
@@ -323,25 +264,6 @@ class Machine:
                       text="ESC closes this sheet")
         win.bind("<Escape>", lambda e: win.destroy())
         setattr(self, slot, win)
-
-    def read_socket(self):
-        if not self.sock:
-            return
-        try:
-            data = self.sock.recv(65536)
-        except (BlockingIOError, OSError):
-            return
-        if not data:
-            self.note = "the line dropped"
-            return
-        text = data.decode("latin-1")
-        if "OPERATOR ID" in text.upper():
-            try:
-                self.sock.sendall(b"OPERATOR 1\n")
-            except OSError:
-                pass
-            return
-        self.note = " ".join(text.split()).replace("OPR>", "").strip()[:140]
 
     # ---------------------------------------------------------------- chrome
     def panel(self, x0, y0, x1, y1, label=None):
@@ -539,7 +461,25 @@ class Machine:
             self.paint(self.poller.state)
 
     # --------------------------------------------------------------- painting
+    def quit_soon(self):
+        """Close after whatever is drawing now has finished. A quit request (the
+        OS at logout, Ctrl-C) can land in the middle of a refresh; tearing the
+        window down there leaves the rest of the refresh drawing on nothing."""
+        if not self.closing:
+            self.closing = True
+            self.root.after(0, self.root.destroy)
+
     def refresh(self):
+        """Run what is due, take a fresh snapshot, paint. While a long absence
+        is being caught up, the sheet says so; then it opens on the report."""
+        if self.closing:
+            return
+        self.session.step()
+        if not self.session.catching_up() and not self.session.welcomed:
+            self.welcome(self.session.welcome())
+        state = self.session.snapshot()
+        state["_fetched"] = self.poller.fetched = time.time()
+        self.poller.state = state
         if self.poller.state:
             self.paint(self.poller.state)
             self.watch_statement(self.poller.state)
@@ -821,6 +761,11 @@ class Machine:
                 shown = shown[:room - 1] + ["  … %d MORE LINE%s NOT PRINTED"
                                             % (cut, "" if cut == 1 else "S")]
             body = shown
+        elif self.session.catching_up():
+            done = self.session.owed_total - self.session.owed
+            body = ["C A T C H I N G   U P", ""] + self.wrap(
+                "THE MACHINE RAN WHILE YOU WERE AWAY. REPLAYING %d OF %d MINUTES; THE "
+                "REPORT FOLLOWS." % (done, self.session.owed_total))
         else:
             waiting = sum(1 for o in s.get("offers") or [] if o.get("state") == "offered")
             body = ["N O   C O M M A N D   Y E T", ""]
@@ -1302,93 +1247,99 @@ def build_settings(f, s, y):
     return y + f.ROW - 10
 
 
-def state_answers(web, host="127.0.0.1"):
-    try:
-        with urllib.request.urlopen("http://%s:%d/state" % (host, web), timeout=1) as r:
-            return bool(json.loads(r.read().decode()))
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        return False
-
-
-def ensure_world(host, port, web, db, tick):
-    """One launcher: if nothing is answering, start a world and own it.
-
-    Returns the child process when this script started one, else None, so the
-    window can stop it again on exit and never leaves a server behind.
-    """
-    if state_answers(web, host):
-        return None
-    if host not in ("127.0.0.1", "localhost"):
-        return None                      # a remote world is not ours to start
-    here = os.path.dirname(os.path.abspath(__file__))
-    cmd = [sys.executable, os.path.join(here, "main.py"),
-           "--port", str(port), "--web", str(web)]
-    if db:
-        cmd += ["--db", db]
-    if tick:
-        cmd += ["--tick", str(tick)]
-    child = subprocess.Popen(cmd, cwd=here, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-    for _ in range(60):                  # up to twelve seconds
-        if state_answers(web, host):
-            return child
-        if child.poll() is not None:
-            return None                  # it refused to start; the window says so
-        threading.Event().wait(0.2)
-    return child
-
-
 def parse():
     import argparse
     ap = argparse.ArgumentParser(description="timeshare, in one window")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=2023, help="command port")
-    ap.add_argument("--web", type=int, default=2024, help="state port")
-    ap.add_argument("--db", default=None, help="save file (default: the server's own)")
+    ap.add_argument("--db", default=None, help="save file (default: the usual place)")
     ap.add_argument("--tick", type=int, default=None, help="seconds per tick")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the engine without a window and exit (for builds)")
+    ap.add_argument("--version", action="version", version="timeshare " + engine.VERSION)
     return ap.parse_args()
 
 
-def log_launch(root):
+def crash_log(db_path, closing=lambda: False):
+    """A packaged window has no console: an error is written next to the save,
+    and the player is told where, so it can be sent on."""
+    import traceback
+    path = os.path.join(os.path.dirname(os.path.abspath(db_path)), "timeshare-crash.log")
+
+    def report(kind, value, tb, root=None):
+        text = "".join(traceback.format_exception(kind, value, tb))
+        try:
+            with open(path, "a") as fh:
+                fh.write("---- %s  timeshare %s  %s\n%s\n"
+                         % (time.strftime("%Y-%m-%d %H:%M:%S"), engine.VERSION, sys.platform, text))
+        except OSError:
+            pass
+        if closing():
+            return                    # the window is going away anyway: say nothing
+        try:
+            tkinter.messagebox.showerror(
+                "timeshare", "Something went wrong inside the machine.\n\n"
+                "The details are in:\n%s\n\nThe game will try to carry on." % path)
+        except tk.TclError:
+            pass
+    return report
+
+
+def hold_save(db_path):
+    """One window per save: two would both run the world and spoil it. Returns
+    an open lock file to keep for the window's life, or None if it is taken."""
+    path = db_path + ".lock"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fh = open(path, "a+")
     try:
-        with open(__file__, "rb") as fh:
-            digest = hashlib.md5(fh.read()).hexdigest()[:8]
-        line = "%.0f build=%s file=%s md5=%s tk_scale=%.3f screen=%dx%d win=%s argv=%s\n" % (
-            time.time(), BUILD, os.path.abspath(__file__), digest,
-            root.tk.call("tk", "scaling"),
-            root.winfo_screenwidth(), root.winfo_screenheight(),
-            root.winfo_geometry(), " ".join(sys.argv[1:]))
-        with open(LOG, "a") as fh:
-            fh.write(line)
-    except Exception as exc:              # never let logging break the game
-        print("log failed:", exc, file=sys.stderr)
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
 
 
 def main():
+    # a packaged windowed app on Windows has no console at all: printing would
+    # crash it, so output goes nowhere (the selftest still answers by exit code)
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     args = parse()
-    child = ensure_world(args.host, args.port, args.web, args.db, args.tick)
-
-    def stop_child():
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-
-    atexit.register(stop_child)
-
+    if args.selftest:
+        sys.exit(engine.selftest())
+    db_path = args.db or engine.default_save()
+    held = hold_save(db_path)
+    if held is None:
+        root = tk.Tk()
+        root.withdraw()
+        tkinter.messagebox.showinfo("timeshare", "TIMESHARE IS ALREADY OPEN.\n\n"
+                                    "Only one window can run the bureau at a time.")
+        root.destroy()
+        return
+    state = {"app": None}
+    report = crash_log(db_path, closing=lambda: bool(state["app"] and state["app"].closing))
+    sys.excepthook = report
+    session = engine.Session(db_path, args.tick)
     root = tk.Tk()
-    app = Machine(root, args.host, args.port, args.web)
-    root.after(600, lambda: log_launch(root))
-    root.bind("<Escape>", lambda e: root.destroy())
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda *_: root.destroy())   # so the world goes with the window
+    root.report_callback_exception = report        # errors inside the window, too
+    app = state["app"] = Machine(root, session)
+    root.protocol("WM_DELETE_WINDOW", app.quit_soon)
+    root.bind("<Escape>", lambda e: app.quit_soon())
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        if hasattr(signal, name):                  # Windows has no SIGHUP
+            signal.signal(getattr(signal, name), lambda *_: app.quit_soon())
     try:
         root.mainloop()
     finally:
         app.poller.stop = True
-        stop_child()
+        session.close()                            # saved, and the next report starts here
+        held.close()
 
 
 if __name__ == "__main__":

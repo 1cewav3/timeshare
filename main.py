@@ -15,10 +15,12 @@ import json
 import os
 import random
 import sqlite3
+import sys
 import time
 
 import content as C
 
+VERSION = "0.1.0"
 PROMPT = "OPR> "
 LOG_KEEP = 2000
 INT_KEYS = {"start_cores", "start_lines", "demand_ceiling", "fault_roll_every"}
@@ -3518,6 +3520,133 @@ async def web_handler(reader, writer, world, rng, lock):
             pass
 
 
+def welcome(world, name="OPERATOR", first=True):
+    """What an operator sees on logging in: the welcome line, what is down,
+    and, for the first one back, the report of what happened while away."""
+    report = r_away(world) if first else ""
+    if report:
+        world.last_report = report
+    world.mark_seen()
+    down = ""
+    if world.faults:
+        down = ("  %d FAULT%s DOWN: %s  (TYPE FAULTS)\r\n"
+                % (len(world.faults), "" if len(world.faults) == 1 else "S",
+                   ", ".join(f["kind"].upper() + " %d" % f["n"] for f in world.faults)))
+    if world.offers():
+        down += ("  %d OFFER%s ON THE TELEPRINTER  (TYPE OFFERS)\r\n"
+                 % (len(world.offers()), "" if len(world.offers()) == 1 else "S"))
+    text = ("\r\nWELCOME, %s. TICK %d. CASH %.2f. %d CALLERS ON SYSTEM.\r\n%s\r\n"
+            % ((name or "OPERATOR").upper()[:16], world.ticks, world.money, world.subs, down))
+    return text + (report + "\r\n" if report else "")
+
+
+def selftest():
+    """Run the engine end to end without a window: a packaged build proves it
+    carries everything it needs (sqlite, the content, the commands) on a
+    machine with no screen. Returns 0 when all is well."""
+    import tempfile
+    failures = []
+
+    def check(name, ok):
+        if not ok:
+            failures.append(name)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "selftest.db")
+        s = Session(path, 1)
+        check("welcome", "WELCOME" in s.welcome())
+        s.world.money = 1000.0
+        for line, want in (("STATUS", "SYSTEM REPORT"), ("HELP INDEX", "TABS"),
+                           ("BUY LINES 2", "OK:"), ("OFFERS", "WORK OFFERED"),
+                           ("EFFECTS", "PUSHING"), ("PLANT", "UNIT BY UNIT")):
+            out, _closing = s.command(line)
+            check(line, want in out)
+        for _ in range(500):
+            s.world.tick(s.rng)
+        check("ticks", s.world.ticks >= 500)
+        s.close()
+        again = Session(path, 1)
+        check("reload", again.world.lines == 10 and again.world.ticks >= 500)
+        again.close()
+    print("TIMESHARE %s selftest: %s" % (VERSION, "OK" if not failures else
+                                           "FAILED " + ", ".join(failures)))
+    return 1 if failures else 0
+
+
+class _NoLock:
+    """The window runs everything on one thread: nothing to lock against."""
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class Session:
+    """The world run inside the window's own process. Nothing listens on the
+    network: commands and the numbers the panel draws go straight to the engine.
+
+    Time missed while the game was closed is caught up in slices (step), so the
+    window can show it happening instead of freezing; then welcome() gives the
+    away report, once."""
+
+    CATCH_UP_CAP = 60 * 24 * 30              # a month at most, as advance() allows
+
+    def __init__(self, db_path, interval=None):
+        self.world = open_world(db_path, interval)
+        self.rng = random.Random()
+        self.lock = _NoLock()
+        w, now = self.world, time.time()
+        self.owed = 0
+        if w.last_tick <= 0 or w.mode == "session":
+            w.last_tick = int(now)            # new, or frozen while nobody was on
+        else:
+            self.owed = max(0, min(int((now - w.last_tick) // w.tick_seconds), self.CATCH_UP_CAP))
+        self.owed_total = self.owed
+        self.welcomed = False
+
+    def catching_up(self):
+        return self.owed > 0
+
+    def step(self, budget=0.15):
+        """Run whatever ticks are due. While catching up, work for at most
+        `budget` seconds at a time, so the window stays responsive."""
+        w = self.world
+        if self.owed:
+            end = time.time() + budget
+            while self.owed and time.time() < end:
+                w.tick(self.rng)
+                w.last_tick += w.tick_seconds
+                self.owed -= 1
+            if not self.owed:
+                w.save()
+            return
+        if w.advance(time.time(), self.rng):
+            w.save()
+
+    def welcome(self):
+        self.welcomed = True
+        self.world.live = 1                   # someone is at the console now
+        text = welcome(self.world, "OPERATOR")
+        self.world.save()
+        return text
+
+    def command(self, line):
+        """One command, exactly as the socket would have run it. (text, closing)"""
+        return asyncio.run(run_command(self.world, self.rng, self.lock, line, "window"))
+
+    def snapshot(self):
+        return snapshot(self.world)
+
+    def close(self):
+        w = self.world
+        w.live = 0
+        w.mark_seen()                          # the next report starts here
+        w.save()
+        if w.db is not None:
+            w.db.close()
+
+
 async def handle(reader, writer, world, rng, lock):
     peer = writer.get_extra_info("peername")
     world.live += 1
@@ -3527,24 +3656,8 @@ async def handle(reader, writer, world, rng, lock):
         await writer.drain()
         name = clean_line(await asyncio.wait_for(reader.readline(), 120))
         async with lock:
-            # one report per absence: only the first operator back gets it
-            report = r_away(world) if world.live <= 1 else ""
-            if report:
-                world.last_report = report
-            world.mark_seen()
-        down = ""
-        if world.faults:
-            down = ("  %d FAULT%s DOWN: %s  (TYPE FAULTS)\r\n"
-                    % (len(world.faults), "" if len(world.faults) == 1 else "S",
-                       ", ".join(f["kind"].upper() + " %d" % f["n"] for f in world.faults)))
-        if world.offers():
-            down += ("  %d OFFER%s ON THE TELEPRINTER  (TYPE OFFERS)\r\n"
-                     % (len(world.offers()), "" if len(world.offers()) == 1 else "S"))
-        writer.write(("\r\nWELCOME, %s. TICK %d. CASH %.2f. %d CALLERS ON SYSTEM.\r\n%s\r\n"
-                      % ((name or "OPERATOR").upper()[:16], world.ticks, world.money,
-                         world.subs, down)).encode())
-        if report:
-            writer.write(wire(report + "\r\n"))
+            text = welcome(world, name, first=world.live <= 1)
+        writer.write(wire(text))
         writer.write(PROMPT.encode())
         await writer.drain()
 
@@ -3594,7 +3707,23 @@ async def ticker(world, rng, lock, interval):
                 world.save()
 
 
-async def serve(port, db_path, interval, web_port=0):
+def default_save():
+    """Where the save lives: the operating system's own place for app data.
+    A save in the old place (~/timeshare) is kept where it is."""
+    old = os.path.expanduser("~/timeshare/timeshare.db")
+    if os.path.exists(old):
+        return old
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "Timeshare", "timeshare.db")
+
+
+def open_db(db_path):
+    """The save: one SQLite file, its tables made or brought up to date."""
     db = None
     if db_path:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
@@ -3639,6 +3768,12 @@ async def serve(port, db_path, interval, web_port=0):
         except sqlite3.OperationalError:
             pass
 
+    return db
+
+
+def open_world(db_path, interval=None):
+    """A world loaded from the save (or kept in memory if there is none)."""
+    db = open_db(db_path)
     world = World(db)
     world.load()
     world.load_faults()
@@ -3648,6 +3783,11 @@ async def serve(port, db_path, interval, web_port=0):
     world.load_units()
     if interval:                 # only an explicit --tick overrides the saved rate
         world.tick_seconds = interval
+    return world
+
+
+async def serve(port, db_path, interval, web_port=0):
+    world = open_world(db_path, interval)
     rng = random.Random()
     lock = asyncio.Lock()
     with_lock = world.advance(time.time(), rng)
@@ -3655,17 +3795,19 @@ async def serve(port, db_path, interval, web_port=0):
         world.save()
         print("caught up %d ticks while nobody was watching" % with_lock, flush=True)
 
+    # a developer's tool (tests, the terminal client): this machine only. The
+    # game itself runs the world in its own window and listens on nothing.
     server = await asyncio.start_server(
-        lambda r, w: handle(r, w, world, rng, lock), "0.0.0.0", port)
+        lambda r, w: handle(r, w, world, rng, lock), "127.0.0.1", port)
     web_server = None
     if web_port:
         web_server = await asyncio.start_server(
-            lambda r, w: web_handler(r, w, world, rng, lock), "0.0.0.0", web_port)
+            lambda r, w: web_handler(r, w, world, rng, lock), "127.0.0.1", web_port)
     ticker_task = asyncio.create_task(ticker(world, rng, lock, interval))
     print("timeshare up on port %d, state %s, tick %ds"
           % (port, db_path or "(memory only)", world.tick_seconds), flush=True)
     if web_server:
-        print("state at http://0.0.0.0:%d/state" % web_port, flush=True)
+        print("state at http://127.0.0.1:%d/state" % web_port, flush=True)
     async with server:
         await server.serve_forever()
 
@@ -3918,7 +4060,7 @@ def run_sim(ticks, seeds, names=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=2023)
-    ap.add_argument("--db", default=os.path.expanduser("~/timeshare/timeshare.db"))
+    ap.add_argument("--db", default=default_save())
     ap.add_argument("--tick", type=int, default=None,
                     help="seconds per tick (default: the rate saved with the world)")
     ap.add_argument("--web", type=int, default=0,
