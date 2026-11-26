@@ -908,9 +908,10 @@ class World:
             sources.append(C.UPGRADES[name]["effects"])
         for name in self.works:
             sources.append(C.WORKS[name]["effects"])
-        sources.append(self.price_effects())
-        if self.rival:
-            sources.append({"demand_mult": 1.0 - self.rival_take()})
+        if self.price != 100:
+            # the price's pull on callers is applied in demand(), after the
+            # market's ceiling: only what we earn per caller goes in the pool
+            sources.append({"rate_mult": self.price / 100.0})
         for m in self.mods:
             sources.append(m["effects"])
         if self.project:
@@ -1151,7 +1152,14 @@ class World:
         raw = (b["base_demand"] + (b["demand_growth"] + eff["growth_add"]) * self.ticks
                + self.rep * b["demand_per_rep"])
         d = raw * eff["demand_mult"] + eff["demand_flat"]
-        return max(0, min(self.ceiling, d))
+        # the market is as big as the site allows; our price decides how much of
+        # it will pay, and the rival takes its share of what is left. Applied
+        # after the ceiling, so a dearer price always costs callers.
+        market = max(0, min(self.ceiling, d))
+        return market * self.price_pull() * (1.0 - self.rival_take())
+
+    def price_pull(self):
+        return (self.price / 100.0) ** -C.PRICE_ELASTICITY
 
     # -- the clock ---------------------------------------------------------
     def tick(self, rng):
@@ -1378,47 +1386,60 @@ TICK_SECONDS = 60
 # rendering (only ever called on a command)
 # --------------------------------------------------------------------------
 def r_status(w):
-    body = [
-        "",
-        "  SYSTEM REPORT                      TICK %d" % w.ticks,
-        "  " + "-" * 52,
-        "  PROCESSING MODULES      %3d   (can serve %d callers: %s)"
-        % (w.cores, w.module_room_all, plant_models(w)),
-        "  DIAL-IN LINES           %3d   (can carry %d callers)" % (w.lines, w.lines),
-        site_line(w),
-        capacity_line(w),
-        staff_line(w),
-        mods_line(w),
-        ("  BUILDING                %9.2f of %.0f   (%.1f%% towards the deeds)"
-         % ((w.money,) + goal_progress(w))) if not w.won_tick else
-        ("  BUILDING                %s - YOURS SINCE TICK %d" % (C.BUILDING_NAME, w.won_tick)),
-        contract_line(w),
-        ("  PRICE                   %3d%%  of the list rate" % w.price) if w.price != 100 else "",
-        ("  RIVAL                   %s takes %d%%" % (w.rival["name"], round(100 * w.rival_take())))
-        if w.rival else "",
-        ("  LOAN                    %.2f owed, due in %s" % (w.loan["owed"], short(w.loan["due"] - w.ticks)))
-        if w.loan else "",
-        overdraft_line(w),
-        idle_lines_line(w),
-        "  CALLERS TURNED AWAY     %3d   (busy signal, paid nothing)" % max(0, w.subs - w.served),
-        "  SUBSCRIBERS ON SYSTEM   %3d   of which served: %d" % (w.subs, w.served),
-        "  REPUTATION              %5.2f  %s  (%.0f%% of callers refused, demand %d)"
-        % (w.rep, ("+%.3f/tick" % w.rep_trend) if w.rep_trend >= 0 else ("%.3f/tick" % w.rep_trend),
-           100 * w.refused_share, int(w.demand)),
-        "  " + "-" * 52,
-        "  PROCESSING IN SERVICE   %3d   DIAL TONE LINES IN SERVICE  %3d"
-        % (w.working_cores, w.working_lines),
-        "  BATCH SLOTS             %3d   running %d, queued %d"
-        % (w.slots, w.running, w.queued),
-        faults_block(w),
-        "  " + "-" * 52,
-        "  REVENUE PER TICK        %7.3f" % w.revenue,
-        "  OUTGOINGS PER TICK      %7.3f" % w.outgoings,
-        "  NET PER TICK            %7.3f" % w.net,
-        "  CASH                    %7.2f" % w.money,
-        "",
-    ]
-    return "\r\n".join(x for x in body if x != "") + "\r\n"
+    """The system report, written for the paper: 49 columns and 17 lines.
+    Eleven fixed lines, then the most pressing notes."""
+    cap, by_mod, by_line = w.capacity, w.module_room, w.working_lines * C.BALANCE["line_users"]
+    limit = ("NOTHING IN SERVICE" if cap == 0 else "LIMITED BY LINES" if by_line < by_mod
+             else "LIMITED BY MODULES" if by_mod < by_line else "MATCHED")
+    refused = max(0, w.subs - w.served)
+    trend = w.rep_trend
+    out = ["",
+           "  SYSTEM REPORT%sTICK %d" % (" " * max(1, REPORT_WIDTH - 20 - len(str(w.ticks))), w.ticks),
+           RULE,
+           "  CASH               %10s" % "{:,.2f}".format(w.money),
+           "  REVENUE PER TICK   %+10.3f" % w.revenue,
+           "  OUTGOINGS PER TICK %+10.3f   NET %+.3f" % (-w.outgoings, w.net),
+           "  CALLERS            %3d SERVED OF %d WANTING" % (w.served, w.subs),
+           "  TURNED AWAY        %3d  (%d%% REFUSED)" % (refused, round(100 * w.refused_share)),
+           "  USABLE CAPACITY    %3d  %s" % (cap, limit),
+           "  PLANT              %d MODULE%s, %d LINES" % (w.cores, "" if w.cores == 1 else "S", w.lines),
+           "  BATCH SLOTS        %3d  RUNNING %d, QUEUED %d" % (w.slots, w.running, w.queued),
+           "  REPUTATION        %5.2f  %+.3f A TICK" % (w.rep, trend),
+           RULE]
+    notes = []
+    if w.overdraft_ticks:
+        notes.append("OVERDRAWN %d/%d TICKS, THEN WE ARE CUT OFF"
+                     % (w.overdraft_ticks, C.BALANCE["overdraft_grace"]))
+    if w.faults:
+        down = ", ".join("%s %d" % (f["kind"].upper(), f["n"]) for f in w.faults[:3])
+        notes.append("DOWN: %s%s  (FAULTS)" % (down, " +%d" % (len(w.faults) - 3)
+                                               if len(w.faults) > 3 else ""))
+    spare = w.working_lines - w.module_room
+    if spare > 0:
+        notes.append("%d LINE%s IDLE: NO MODULE TO SERVE THEM" % (spare, "" if spare == 1 else "S"))
+    if w.incident:
+        notes.append("DECISION WAITING: TYPE INCIDENT")
+    if w.project:
+        notes.append("%s: %s LEFT" % (w.project["name"][:30], short(w.project["left"])))
+    if w.loan:
+        notes.append("LOAN %.2f, DUE IN %s" % (w.loan["owed"], short(w.loan["due"] - w.ticks)))
+    live = w.active()
+    if live:
+        first = min(live, key=lambda c: c["ticks_left"])
+        notes.append("%d LIVE JOB%s; %s ENDS IN %s" % (len(live), "" if len(live) == 1 else "S",
+                                                      first["company"][:16], short(first["ticks_left"])))
+    if w.rival:
+        notes.append("%s TAKE %d%%" % (w.rival["name"][:30], round(100 * w.rival_take())))
+    if w.price != 100:
+        notes.append("WE CHARGE %d%% OF THE LIST RATE" % w.price)
+    if w.offers():
+        notes.append("%d OFFER%s ON THE TELEPRINTER" % (len(w.offers()), "" if len(w.offers()) == 1 else "S"))
+    room = 17 - (len(out) - 1)
+    if len(notes) > room:
+        notes = notes[:room - 1] + ["AND %d MORE: EFFECTS, OFFERS" % (len(notes) - room + 1)]
+    out += ["  " + n for n in notes] or ["  NOTHING NEEDS YOU."]
+    out.append("")
+    return "\r\n".join(out) + "\r\n"
 
 
 # --------------------------------------------------------------------------
@@ -2367,6 +2388,7 @@ def r_effects(w):
 
     total = w.effects()
     total["queue_rate"] -= C.BALANCE["queue_rate"]      # show the change, not the base
+    total["demand_mult"] *= w.price_pull() * (1.0 - w.rival_take())
     rows = effect_rows(total, indent="    ")
     out.append(rule)
     out.append("  ALL TOGETHER")
@@ -3299,6 +3321,37 @@ def upgrade_offer(w, name, price):
     return {"name": name, "users": w.model(name)["core_users"], "costs": costs}
 
 
+def roles_sheet(w):
+    """Everything the staff sheet shows: each role, and whoever holds it."""
+    out = []
+    for role, data in C.ROLES.items():
+        row = {"role": role, "fee": data["fee"], "salary": data["salary"],
+               "desc": data["desc"], "does": effect_brief(data["effects"]),
+               "train_cost": data["fee"] * C.TRAIN_COST, "hired": None}
+        info = w.staff.get(role)
+        if info:
+            level = info.get("level", 1)
+            nxt = C.STAFF_LEVEL_TICKS[level] if level < len(C.STAFF_LEVEL_TICKS) else None
+            row["hired"] = {"name": info["name"], "level": level, "xp": info.get("xp", 0),
+                            "next": nxt, "morale": info.get("morale", 0),
+                            "salary": round(data["salary"] * info.get("pay", 1.0), 3),
+                            "away": info.get("away_why", "") if info.get("away_until", 0) > w.ticks else "",
+                            "back_in": max(0, info.get("away_until", 0) - w.ticks),
+                            "does": effect_brief(w.staff_effects(role)) if info.get("away_until", 0) <= w.ticks
+                            else ""}
+        out.append(row)
+    return out
+
+
+def bank_sheet(w):
+    return {"owed": round(w.loan["owed"], 2) if w.loan else 0.0,
+            "due_in": (w.loan["due"] - w.ticks) if w.loan else 0,
+            "interest": round(w.interest, 4),
+            "limit": round(w.loan_limit(), 2),
+            "barred_for": max(0, w.bank_barred - w.ticks),
+            "rate_day": C.LOAN_RATE_DAY, "term": C.LOAN_TERM}
+
+
 def shop(w):
     """The order form's catalogue: everything BUY sells, at today's prices."""
     fitting = (w.project.get("then") or {}).get("upgrade") if w.project else None
@@ -3343,6 +3396,8 @@ def snapshot(world):
                     "elasticity": C.PRICE_ELASTICITY},
         "mode": world.mode,
         "shop": shop(world),
+        "roles": roles_sheet(world),
+        "bank": bank_sheet(world),
         "rival": ({"name": world.rival["name"], "price": world.rival["price"],
                    "take": round(world.rival_take(), 3)} if world.rival else None),
         "loan": ({"owed": round(world.loan["owed"], 2), "due_in": world.loan["due"] - world.ticks}
@@ -3695,26 +3750,123 @@ def sim(ticks, seed, strategy):
         elif _w.money > b["price_core"] * 1.2:
             do_buy(_w, ["CORES", "1"])
 
+    # ---- strategies that lean on one of the later systems each, so the sweep
+    # can say whether any of them is a free win or a trap
+    def servicer(_w, _t):
+        """The capacity operator who also keeps the plant serviced."""
+        capacity(_w, _t)
+        if _w.project:
+            return
+        _w.sync_units()
+        worn = max(range(1, _w.cores + 1), key=lambda n: _w.wear(_w.modules[n - 1]["born"]),
+                   default=None)
+        if worn and _w.wear(_w.modules[worn - 1]["born"]) > 2.0:
+            do_service(_w, ["MODULE", str(worn)])
+        elif _w.line_born and sum(_w.wear(x) for x in _w.line_born) / len(_w.line_born) > 2.2:
+            do_service(_w, ["LINES"])
+
+    def set_price(_w, top):
+        """Dearer while callers are being turned away; cheaper only while there
+        are places standing empty. A full house at list price is left alone."""
+        if _w.refused_share > 0.10 and _w.price < top:
+            do_price(_w, [str(_w.price + 5)])
+        elif _w.capacity > _w.subs * 1.1 and _w.price > 80:
+            do_price(_w, [str(_w.price - 5)])
+
+    def pricer(_w, _t):
+        """The capacity operator who sets the price to what the market bears."""
+        capacity(_w, _t)
+        set_price(_w, 150)
+
+    def borrower(_w, _t):
+        """Borrows to the limit to grow faster; pays back when it can."""
+        if not _w.loan and _w.loan_limit() > 50:
+            do_borrow(_w, ["%.0f" % _w.loan_limit()])
+        capacity(_w, _t)
+        if _w.loan and _w.money > 2 * _w.loan["owed"]:
+            do_repay(_w, ["ALL"])
+
+    def upgrader(_w, _t):
+        """Buys the generation ahead instead of the standard, and upgrades old modules."""
+        ahead = [h["name"] for h, p in _w.on_sale() if p > h["price_core"] + 1e-9]
+        if _w.queued and _w.money > b["price_slot"] * 1.2:
+            do_buy(_w, ["SLOTS", "1"])
+            return
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
+            do_buy(_w, ["LINES", "1"])
+        elif ahead and _w.money > 260:
+            if not do_buy(_w, [ahead[0], "1"])[0] and _w.money > 400:
+                do_upgrade_modules(_w, ["MODULES", "1", ahead[0]])
+
+    def engineer(_w, _t):
+        """The capacity operator who builds every engineering work it can afford twice over."""
+        capacity(_w, _t)
+        if _w.project:
+            return
+        for name, wk in C.WORKS.items():
+            if name not in _w.works and (not wk["needs"] or wk["needs"] in _w.works) \
+                    and _w.money > 2 * wk["price"]:
+                do_build(_w, name.split())
+                break
+
+    def staffer(_w, _t):
+        """The capacity operator with a full staff it trains and pays."""
+        capacity(_w, _t)
+        for role in ("OPERATOR", "CLERK", "SALES", "ENGINEER"):
+            if role not in _w.staff and _w.money > C.ROLES[role]["fee"] * 3:
+                do_hire(_w, [role])
+        for role, info in _w.staff.items():
+            if info.get("level", 1) < 3 and _w.money > C.ROLES[role]["fee"] * 4:
+                do_train(_w, [role])
+                break
+
+    def full(_w, _t):
+        """Everything a good operator does: plant, contracts, staff, works, price, service."""
+        staffer(_w, _t)
+        for c in _w.offers():
+            if _w.capacity >= c["want"] * 1.1:
+                do_accept(_w, [str(c["id"])])
+        set_price(_w, 140)
+        if not _w.project:
+            engineer(_w, _t)
+        if not _w.project:
+            servicer(_w, _t)
+
     fn = {"idle": idle, "lines": lines, "capacity": capacity,
           "balanced": balanced, "reckless": reckless,
           "norepair": capacity, "noslots": no_slots,
-          "contractor": contractor, "tycoon": tycoon}[strategy]
+          "contractor": contractor, "tycoon": tycoon,
+          "servicer": servicer, "pricer": pricer, "borrower": borrower,
+          "upgrader": upgrader, "engineer": engineer, "staffer": staffer,
+          "full": full}[strategy]
 
     def repair_if_needed():
-        """Every sane operator fixes what is down; the norepair control does not."""
-        if strategy == "norepair":
+        """Every sane operator fixes what is down; the idle and norepair controls do not.
+        Anyone with a decision waiting takes the first choice it can afford."""
+        if strategy in ("norepair", "idle"):
             return
+        if w.incident and strategy in ("full", "staffer"):
+            for word, _d, _o in w.incident_def()["choices"]:
+                if w.decide(word)[0]:
+                    break
         if w.faults and w.money > sum(repair_cost(f["kind"], w) for f in w.faults) * 1.2:
             do_repair(w, [])
 
     worst_net = 1e9
     cash_1day = None
+    w.liquidations = 0
     for t in range(ticks):
-        if t % 30 == 0:
+        # a person, not a daemon: on for eight hours a day, away for sixteen,
+        # and whatever breaks overnight waits for the morning
+        online = t % 1440 < SIM_ONLINE
+        if online and t % 30 == 0:
             fn(w, t)
-        if t % 10 == 0:
+        if online and t % 10 == 0:
             repair_if_needed()
+        before = w.statement
         w.tick(rng)
+        if w.statement is not before:
+            w.liquidations += 1
         worst_net = min(worst_net, w.net)
         if t == 1439:
             cash_1day = w.money
@@ -3723,28 +3875,44 @@ def sim(ticks, seed, strategy):
     return w
 
 
-def run_sim(ticks, seeds):
-    names = ["idle", "lines", "capacity", "balanced", "contractor",
-             "tycoon", "reckless", "norepair", "noslots"]
-    print("%-10s %10s %9s %8s %10s %8s %10s" %
-          ("strategy", "cash@%d" % ticks, "day1", "worstNet", "served",
-           "busy%", "cores/lines"))
-    for name in names:
-        cash = served = demand = busy = 0.0
-        day1 = worst = 0.0
+def worth(w):
+    """What the business is worth: cash, the plant at its resale price, less the loan."""
+    w.sync_units()
+    plant = (sum(w.model(m["model"])["price_core"] for m in w.modules)
+             + w.lines * C.BALANCE["price_line"]) * C.BALANCE["liquidation_rate"]
+    return w.money + plant - (w.loan["owed"] if w.loan else 0.0)
+
+
+SIM_ONLINE = 480        # minutes a day the simulated operator is at the console
+
+SIM_STRATEGIES = ["idle", "lines", "capacity", "balanced", "contractor", "tycoon",
+                  "reckless", "norepair", "noslots", "servicer", "pricer", "borrower",
+                  "upgrader", "engineer", "staffer", "full"]
+
+
+def run_sim(ticks, seeds, names=None):
+    print("%-10s %9s %9s %8s %8s %7s %5s %11s" %
+          ("strategy", "worth", "cash", "day1", "worstNet", "served", "lost", "cores/lines"))
+    rows = {}
+    for name in names or SIM_STRATEGIES:
+        tot = {"worth": 0.0, "cash": 0.0, "day1": 0.0, "worst": 0.0, "served": 0.0, "lost": 0}
         cl = ""
         for s in range(seeds):
             w = sim(ticks, s * 17 + 3, name)
-            cash += w.money
-            served += w.served
-            demand += w.demand
-            day1 += w.cash_1day
-            worst += w.worst_net
-            busy += (1.0 if w.subs and w.served < w.subs else 0.0)
+            tot["worth"] += worth(w)
+            tot["cash"] += w.money
+            tot["day1"] += w.cash_1day
+            tot["worst"] += w.worst_net
+            tot["served"] += w.served
+            tot["lost"] += w.liquidations
             cl = "%d/%d" % (w.cores, w.lines)
-        print("%-10s %10.1f %9.1f %8.3f %10.1f %7.0f%% %10s" %
-              (name, cash / seeds, day1 / seeds, worst / seeds, served / seeds,
-               100 * busy / seeds, cl))
+        avg = {k: v / float(seeds) for k, v in tot.items()}
+        avg["lost"] = tot["lost"]
+        rows[name] = avg
+        print("%-10s %9.1f %9.1f %8.1f %8.3f %7.1f %5d %11s" %
+              (name, avg["worth"], avg["cash"], avg["day1"], avg["worst"], avg["served"],
+               tot["lost"], cl))
+    return rows
 
 
 def main():

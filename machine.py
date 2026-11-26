@@ -194,6 +194,16 @@ class Machine:
             self.open_form("buy_form", "order form — SYS/370-145",
                            "N O R T H G A T E   ·   P U R C H A S E   O R D E R", build_buy)
             return
+        if word == "STAFF" or word == "BANK":
+            if word == "STAFF":
+                self.open_form("staff_form", "staff — SYS/370-145",
+                               "N O R T H G A T E   ·   T H E   S T A F F", build_staff,
+                               watch=("cash", "roles"))
+            else:
+                self.open_form("bank_form", "the bank — SYS/370-145",
+                               "N O R T H G A T E   ·   T H E   B A N K   M A N A G E R",
+                               build_bank, watch=("cash", "bank", "tick_seconds"))
+            return
         if word in ("SETTINGS", "SETTING", "SET", "OPTIONS"):
             self.open_form("settings_form", "settings — SYS/370-145",
                            "N O R T H G A T E   ·   O P E R A T I N G   S E T T I N G S",
@@ -242,12 +252,12 @@ class Machine:
         # strip newlines only: the first line's indent is part of the layout
         return out.replace("OPR>", "").strip("\r\n")
 
-    def open_form(self, slot, title, heading, builder):
+    def open_form(self, slot, title, heading, builder, watch=None):
         form = getattr(self, slot, None)
         if form is not None and form.alive():
             form.lift()
             return
-        Form(self, slot, title, heading, builder).redraw(force=True)
+        Form(self, slot, title, heading, builder, watch=watch or Form.WATCH).redraw(force=True)
 
     def open_help(self, want=""):
         """The manual on its own sheet, opened at the tab asked for, if any."""
@@ -533,7 +543,7 @@ class Machine:
         if self.poller.state:
             self.paint(self.poller.state)
             self.watch_statement(self.poller.state)
-            for slot in ("buy_form", "settings_form"):
+            for slot in ("buy_form", "settings_form", "staff_form", "bank_form"):
                 form = getattr(self, slot, None)
                 if form is not None and form.alive():
                     form.redraw()
@@ -953,9 +963,11 @@ class Form:
         c.create_line(30, y, self.cw - 30, y, fill=FADE)
         y += 20
         if self.footer:
-            self.text(30, y, self.result or "NOTHING ORDERED YET.", size=10,
-                      fill=INK if self.result else FADE)
-            y += 26
+            # the machine's answer, folded onto a second line if it is long
+            for part in (textwrap.wrap(self.result, 98)[:2] or ["NOTHING ORDERED YET."]):
+                self.text(30, y, part, size=10, fill=INK if self.result else FADE)
+                y += 20
+            y += 6
         self.text(30, y, getattr(self, "hint", "ESC closes this sheet"), size=9, fill=FADE)
         ch = y + 22
         for ry in range(58 + 13, ch - 10, self.ROW):        # ruled paper, under each row
@@ -1107,6 +1119,131 @@ def build_help(f, s, y):
         f.text(300, y, desc, bold=False)
         y += f.ROW
     return y - f.ROW + 10
+
+
+MOODS = {-2: "BITTER", -1: "SULKING", 0: "", 1: "CONTENT", 2: "LOYAL"}
+
+
+def short_time(ticks):
+    return "%dH%02d" % (int(ticks) // 60, int(ticks) % 60)
+
+
+def build_staff(f, s, y):
+    """Who works here, what they do, and the stamps to hire, train and fire."""
+    cash = float(s.get("cash", 0.0))
+    roles = s.get("roles") or []
+    pay = sum(r["hired"]["salary"] for r in roles if r["hired"])
+    f.text(30, y, "CASH %s" % money(cash), size=12)
+    f.text(330, y, "SALARIES %.2f A TICK" % pay, size=10, fill=FADE)
+    y += f.ROW + 6
+    sure = f.qty.get("fire")
+
+    def fire(role):
+        if f.qty.get("fire") == role:          # the second click means it
+            f.qty["fire"] = None
+            f.send("FIRE " + role)
+        else:
+            f.qty["fire"] = role
+            f.redraw(force=True)
+
+    for r in roles:
+        h = r["hired"]
+        f.text(40, y, r["role"])
+        if h:
+            f.text(150, y, h["name"])
+            progress = ("  %d%%" % min(99, 100 * h["xp"] // h["next"])) if h["next"] else "  TOP"
+            f.text(270, y, "LEVEL %d%s" % (h["level"], progress), size=10)
+            f.text(500, y, "%.2f/TICK" % h["salary"], size=10, anchor="e")
+            if h["level"] < 3 and not h["away"]:
+                f.stamp(560, y, "TRAIN %.0f" % r["train_cost"], lambda k=r["role"]: f.send("TRAIN " + k),
+                        width=120, dim=r["train_cost"] > cash)
+            f.stamp(764, y, "SURE?" if sure == r["role"] else "FIRE", lambda k=r["role"]: fire(k),
+                    width=86, lit=sure == r["role"])
+            y += f.ROW - 8
+            bits = [h["does"] or "NOTHING WHILE AWAY"]
+            if h["away"]:
+                bits.append("%s, BACK IN %s" % (h["away"], short_time(h["back_in"])))
+            if MOODS.get(max(-2, min(2, h["morale"]))):
+                bits.append(MOODS[max(-2, min(2, h["morale"]))])
+            f.text(150, y, "  ·  ".join(bits), size=10, fill=FADE)
+        else:
+            f.text(150, y, "VACANT", fill=FADE)
+            f.text(500, y, "%.2f/TICK" % r["salary"], size=10, anchor="e", fill=FADE)
+            f.stamp(764, y, "HIRE %.0f" % r["fee"], lambda k=r["role"]: f.send("HIRE " + k),
+                    width=86, dim=r["fee"] > cash)
+            y += f.ROW - 8
+            line = r["does"] + "  ·  " + r["desc"].upper()
+            if len(line) > 84:                       # cut at a word, inside the paper
+                line = line[:83].rsplit(" ", 1)[0].rstrip(",;") + "…"
+            f.text(150, y, line, size=10, fill=FADE)
+        y += f.ROW + 4
+    f.text(30, y, "THEY LEVEL UP WITH EXPERIENCE AND ASK FOR A RAISE WHEN THEY DO. "
+                  "TRAINING TAKES THEM AWAY 8 HOURS.", size=9, fill=FADE)
+    return y + 6
+
+
+LOAN_STEPS = [10, 20, 50, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000]
+
+
+def build_bank(f, s, y):
+    """The bank manager: what we owe, what he would lend, and the stamps."""
+    cash = float(s.get("cash", 0.0))
+    b = s.get("bank") or {}
+    ts = float(s.get("tick_seconds") or 60)
+    f.text(30, y, "CASH %s" % money(cash), size=12)
+    y += f.ROW + 6
+    owed = float(b.get("owed", 0.0))
+    f.text(40, y, "WE OWE")
+    f.text(330, y, money(owed), anchor="e")
+    if owed:
+        f.text(350, y, "INTEREST %.3f A TICK (%.0f%% A DAY)" % (b["interest"], 100 * b["rate_day"]),
+               size=10, fill=FADE)
+        y += f.ROW
+        due = int(b.get("due_in", 0))
+        f.text(40, y, "DUE IN")
+        f.text(330, y, short_time(due), anchor="e")
+        secs = int(due * ts)
+        f.text(350, y, "ABOUT %s IN REAL TIME"
+               % ("%dM" % (secs // 60) if secs < 3600 else "%dH%02dM" % (secs // 3600, secs % 3600 // 60)),
+               size=10, fill=FADE)
+        y += f.ROW - 8
+        f.text(350, y, "THEN THE BANK TAKES IT, OVERDRAWN OR NOT.", size=10, fill=FADE)
+    y += f.ROW + 8
+
+    f.text(30, y, "B O R R O W", size=10, fill=FADE)
+    y += f.ROW - 4
+    limit = float(b.get("limit", 0.0))
+    if b.get("barred_for"):
+        f.text(40, y, "THE BANK WILL NOT LEND TO US FOR %s." % short_time(b["barred_for"]), fill=FADE)
+    elif limit < 10:
+        f.text(40, y, "THE MANAGER WILL NOT GO ANY FURTHER.", fill=FADE)
+    else:
+        f.text(40, y, "HE WOULD LEND")
+        f.text(330, y, money(limit), anchor="e")
+        steps = [v for v in LOAN_STEPS if v <= limit] or [int(limit)]
+        f.qty["borrow"] = min(f.qty.get("borrow", steps[0]), steps[-1])
+        n = f.counter(568, y, "borrow", steps[0], steps[-1], steps=steps)
+        f.stamp(764, y, "BORROW", lambda: f.send("BORROW %d" % n), width=86)
+        y += f.ROW
+        f.text(40, y, "THE LIMIT FOLLOWS WHAT THE PLANT COST AND OUR REPUTATION. DUE IN %s."
+               % short_time(b.get("term", 14400)), size=10, fill=FADE)
+    y += f.ROW + 8
+
+    f.text(30, y, "R E P A Y", size=10, fill=FADE)
+    y += f.ROW - 4
+    if owed <= 0:
+        f.text(40, y, "NOTHING TO REPAY.", fill=FADE)
+    else:
+        top = min(owed, cash)
+        steps = [v for v in LOAN_STEPS if v <= top] or [max(1, int(top))]
+        f.qty["repay"] = min(f.qty.get("repay", steps[0]), steps[-1])
+        n = f.counter(568, y, "repay", steps[0], steps[-1], steps=steps)
+        f.text(40, y, "PAY SOME BACK")
+        f.stamp(764, y, "REPAY", lambda: f.send("REPAY %d" % n), width=86, dim=top < 1)
+        y += f.ROW
+        f.text(40, y, "OR ALL %s AT ONCE" % money(owed))
+        f.stamp(764, y, "ALL", lambda: f.send("REPAY ALL"), width=86, dim=cash < owed)
+    return y + f.ROW - 10
 
 
 TICK_STEPS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 120, 300, 600, 1800, 3600]

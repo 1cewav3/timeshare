@@ -43,6 +43,11 @@ done
 
 Never point the smoke test at a world someone is playing: it spends money.
 
+`tools/balance_check.py` is slower (about two minutes): it runs the balance
+sweep and checks its shape. Doing everything beats any one system, every
+investment pays over three weeks, and doing nothing ends in liquidation.
+`python3 main.py --sim 10080 --seeds 3` prints the sweep itself.
+
 All the fiction and every number live in `content.py`. `main.py` is the
 engine; `tools/` are the checks that keep it honest.
 

@@ -40,7 +40,7 @@ def main():
     checks.append(("the hire is named", any(r == "OPERATOR" for r in w.staff)))
     checks.append(("a salary appears in outgoings", w.outgoings > base_out))
     checks.append(("the operator's effect is live (faults less likely)",
-                   abs(w.effects()["fault_mult"] - 0.85) < 1e-9))
+                   abs(w.effects()["fault_mult"] - C.ROLES["OPERATOR"]["effects"]["fault_mult"]) < 1e-9))
     ok, msg = M.do_hire(w, ["OPERATOR"])
     checks.append(("you cannot hire the same role twice", not ok))
     ok, msg = M.do_hire(w, ["WIZARD"])

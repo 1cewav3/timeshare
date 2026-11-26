@@ -53,15 +53,15 @@ HELP_SECTIONS = [
     ("MONEY", "MONEY", "Rent and wages go out every tick. Overdrawn too long, we are cut off.", [
         ("STATUS", "revenue, outgoings and cash, tick by tick"),
         ("PRICE [n]", "what we charge, per cent of list (or SETTINGS)"),
-        ("BANK", "what we owe, and what the manager would lend"),
-        ("BORROW n / REPAY n|ALL", "borrow, and pay it back; interest every tick"),
+        ("BANK", "the bank sheet: what we owe; borrow and repay"),
+        ("BORROW n / REPAY n|ALL", "the same, typed; interest every tick"),
         ("GOAL", "the building, and how far off it is"),
         ("STATEMENT", "the final statement from our last bankruptcy"),
     ]),
     ("PEOPLE", "PEOPLE", "Staff make the machine better and grow with experience. Customers remember.", [
-        ("STAFF", "who works here: level, mood, pay, who is away"),
-        ("HIRE / FIRE <role>", "take someone on, or let them go"),
-        ("TRAIN <role>", "a course: away a while, back a level up"),
+        ("STAFF", "the staff sheet: who works here; hire, train, fire"),
+        ("HIRE / FIRE <role>", "the same, typed"),
+        ("TRAIN <role>", "a course: away 8 hours, back a level up"),
         ("ACCOUNTS", "our customers, and how they feel about us"),
     ]),
     ("WORK", "WORK", "Contracts guarantee callers for a term. Projects take the engineers' time.", [
@@ -245,22 +245,22 @@ EFFECT_KEYS = ("rate_mult", "demand_mult", "demand_flat", "queue_rate",
 
 ROLES = {
     "OPERATOR": {
-        "fee": 120.0, "salary": 0.10,
-        "effects": {"fault_mult": 0.85, "repair_mult": 0.9},
+        "fee": 120.0, "salary": 0.06,
+        "effects": {"fault_mult": 0.75, "repair_mult": 0.8},
         "desc": "watches the console, logs faults early, keeps the tapes clean",
     },
     "SALES": {
-        "fee": 150.0, "salary": 0.12,
+        "fee": 150.0, "salary": 0.08,
         "effects": {"growth_add": 0.004, "demand_mult": 1.08},
         "desc": "works the telephone, brings in accounts that would not have called",
     },
     "ENGINEER": {
-        "fee": 220.0, "salary": 0.16,
+        "fee": 220.0, "salary": 0.11,
         "effects": {"slots_add": 2, "capacity_mult": 1.05},
         "desc": "squeezes another channel out of the machine, fixes what the operator misses",
     },
     "CLERK": {
-        "fee": 80.0, "salary": 0.06,
+        "fee": 80.0, "salary": 0.04,
         "effects": {"queue_rate": 0.12, "cost_mult": 0.97},
         "desc": "chases invoices and stops the queued work being written off",
     },
@@ -481,7 +481,7 @@ TRADE_IN_RATE = 0.4           # a working module is worth this much towards a ne
 
 # HARDWARE (above) is the standard issue for each cycle. Any model up to one
 # generation past your cycle's standard is on sale; the one ahead costs more.
-AHEAD_PREMIUM = 1.6
+AHEAD_PREMIUM = 1.3
 
 # ---- your price --------------------------------------------------------------
 # PRICE n sets what we charge, in per cent of the list rate. Callers fall away
@@ -525,13 +525,13 @@ WORKS = {
         "desc": "a program that packs batch jobs tighter into the slots",
     },
     "LINE SCANNER": {
-        "price": 350.0, "ticks": 480, "needs": None,
-        "effects": {"fault_mult": 0.85},
+        "price": 300.0, "ticks": 480, "needs": None,
+        "effects": {"fault_mult": 0.8},
         "desc": "tests every line at three in the morning and logs the weak ones",
     },
     "MODEM POOL": {
-        "price": 600.0, "ticks": 720, "needs": None,
-        "effects": {"demand_flat": 4},
+        "price": 450.0, "ticks": 720, "needs": None,
+        "effects": {"demand_flat": 6},
         "desc": "callers who got an engaged tone are held for the next free line",
     },
     "BILLING TO THE SECOND": {
@@ -540,13 +540,13 @@ WORKS = {
         "desc": "the accounting run charges for every second, not every minute",
     },
     "REMOTE DIAGNOSTICS": {
-        "price": 450.0, "ticks": 600, "needs": "LINE SCANNER",
-        "effects": {"repair_mult": 0.75},
+        "price": 300.0, "ticks": 600, "needs": "LINE SCANNER",
+        "effects": {"repair_mult": 0.6, "fault_mult": 0.95},
         "desc": "the engineer finds the fault from the console before going upstairs",
     },
     "SECOND POWER FEED": {
-        "price": 900.0, "ticks": 960, "needs": "REMOTE DIAGNOSTICS",
-        "effects": {"capacity_mult": 1.03, "fault_mult": 0.92},
+        "price": 700.0, "ticks": 960, "needs": "REMOTE DIAGNOSTICS",
+        "effects": {"capacity_mult": 1.05, "fault_mult": 0.9},
         "desc": "a second cable from the substation; the machine stops browning out",
     },
 }
