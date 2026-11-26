@@ -67,7 +67,8 @@ def main():
 
     s.sendall(b"HELP\r\n")
     raw = read_until(s, "OPR>").encode("latin-1")
-    checks.append(("HELP lists BUY", b"BUY LINES" in raw and b"BUY CORES" in raw))
+    checks.append(("HELP lists the buy and settings sheets", b"BUY" in raw and b"SETTINGS" in raw
+                   and b"BUY LINES" not in raw))
     checks.append(("every HELP line carries a carriage return",
                    raw.count(b"\n") == raw.count(b"\r\n")))
 

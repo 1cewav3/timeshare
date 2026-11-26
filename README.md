@@ -36,7 +36,7 @@ MODE SESSION
 ```
 python3 main.py --port 2099 --db /tmp/test.db --tick 1 &   # a throwaway world
 python3 tools/smoke.py 127.0.0.1 2099 --force
-for t in away lesson statement incident site sell liquidate tycoon contract goal rep; do
+for t in away lesson statement incident site plant business sell liquidate tycoon contract goal rep; do
     python3 tools/${t}_check.py
 done
 ```

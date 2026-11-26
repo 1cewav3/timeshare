@@ -6,3 +6,5 @@ __pycache__/
 archive/
 .venv/
 *.log
+docs/previews/
+*.zip

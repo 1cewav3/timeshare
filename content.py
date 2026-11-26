@@ -19,52 +19,91 @@ BANNER = [
     "",
 ]
 
-HELP = """\
-COMMANDS
-  STATUS          system report: revenue, outgoings, load
-  USERS           who is dialled in and what they are costing you
-  JOBS            what is running and what is queued behind it
-  BUY LINES n     add dial-in lines (one caller each)
-  BUY CORES n     add a processing module (eight callers each)
-  BUY SLOTS n     add a batch slot: one more caller's work runs at once
-  SELL LINES n    sell working lines you cannot fill (40% back)
-  SELL SLOTS n    get rid of spare batch slots (40% back)
-  FAULTS          what is down, how long, and what it costs to fix
-  REPAIR          fix everything that is down
-  REPAIR LINE n   fix one line          (REPAIR MODULE n for a module)
-  STAFF           who works for you and what they cost
-  HIRE <role>     take someone on      FIRE <role>     let them go
-  UPGRADES        permanent equipment you can buy
-  BUY <upgrade>   order it; the engineers fit it over a while
-  SITES           locations you could run the machine from
-  MOVE <n>        relocate the machine (it is off while it is in the van)
-  PROJECT         work under way, and how long it has left
-  INCIDENT        the question waiting for you, and its choices
-  DECIDE <word>   answer it; unanswered, the default is taken for you
-  MODS            buffs and debuffs currently in force
-  EFFECTS         every trade pushing the business, + and -, and the total
-  PRESTIGE        sell the business and start again, better
-  GOAL            what you are working towards, and how far away it is
-  MODE            which clock drives the world
-  MODE WALL       the machine runs even with nobody dialled in
-  MODE SESSION    the machine only runs while someone is on
-  TICK n          seconds per tick (1 to 3600), saved with the world
-  SCRAP LINE n    sell a dead unit for parts (20% of its price)
-  BODGE LINE n    repair a dead unit at half price; each bodge adds 5% to the fault rate
-  BUY BUILDING    buy the building and stop paying rent
-  OFFERS          work offered to you, with a deadline and a penalty
-  ACCEPT n        take offer n (up to 3 at once)
-  CLOSE n         call a live job in early; it pays for the term you served
-  DROP n          turn offer n down
-  NEWS            console messages since you were last on
-  AWAY            what happened while you were gone, again
-  STATEMENT       the final statement from the last time we went broke
-  LOG             recent system journal
-  BYE             drop carrier
+# ---- the operator's manual ------------------------------------------------------
+# Sections of the manual: a key (HELP <key>), a title, one sentence on what that
+# part of the game is, and its commands. In the window each section is a tab;
+# typed HELP prints them all. EVERY DAY repeats what most sessions need.
+HELP_SECTIONS = [
+    ("DAY", "EVERY DAY", "What most sessions need. Everything else is under the other tabs.", [
+        ("STATUS", "the system report: money, load, what limits us"),
+        ("BUY", "the order form: lines, modules, slots, equipment"),
+        ("SETTINGS", "the settings sheet: the clock, the mode, our price"),
+        ("OFFERS / ACCEPT n", "work on the teleprinter, and taking it"),
+        ("FAULTS / REPAIR", "what is down, and fixing all of it"),
+        ("INCIDENT / DECIDE <word>", "the question waiting, and answering it"),
+        ("EFFECTS", "everything pushing the business up or down"),
+        ("AWAY", "what happened while you were gone"),
+        ("HELP <tab>", "one part of this manual: HELP PLANT, HELP MONEY..."),
+        ("BYE", "hang up; the machine keeps running"),
+    ]),
+    ("PLANT", "THE PLANT", "Modules process callers and lines carry them; both wear, and both break.", [
+        ("BUY", "the order form"),
+        ("MACHINES", "the module models on sale, and what they do"),
+        ("PLANT", "every unit: model, age, how worn"),
+        ("FAULTS", "what is down, for how long, and the repair bill"),
+        ("REPAIR [LINE|MODULE n]", "fix everything, or one unit"),
+        ("BODGE LINE|MODULE n", "tape a dead unit up at half price; +5% breakdowns"),
+        ("SCRAP LINE|MODULE n", "sell a dead unit for parts (20% back)"),
+        ("SERVICE MODULE n|LINES", "worn units come back as good as new"),
+        ("REPLACE MODULE n <model>", "trade a module in for a new one now"),
+        ("UPGRADE MODULES n <model>", "swap the n most worn lesser ones (or on BUY)"),
+        ("SELL LINES|SLOTS n", "get rid of what we cannot fill (40% back)"),
+        ("USERS / JOBS", "who is dialled in; what is running and queued"),
+    ]),
+    ("MONEY", "MONEY", "Rent and wages go out every tick. Overdrawn too long, we are cut off.", [
+        ("STATUS", "revenue, outgoings and cash, tick by tick"),
+        ("PRICE [n]", "what we charge, per cent of list (or SETTINGS)"),
+        ("BANK", "what we owe, and what the manager would lend"),
+        ("BORROW n / REPAY n|ALL", "borrow, and pay it back; interest every tick"),
+        ("GOAL", "the building, and how far off it is"),
+        ("STATEMENT", "the final statement from our last bankruptcy"),
+    ]),
+    ("PEOPLE", "PEOPLE", "Staff make the machine better and grow with experience. Customers remember.", [
+        ("STAFF", "who works here: level, mood, pay, who is away"),
+        ("HIRE / FIRE <role>", "take someone on, or let them go"),
+        ("TRAIN <role>", "a course: away a while, back a level up"),
+        ("ACCOUNTS", "our customers, and how they feel about us"),
+    ]),
+    ("WORK", "WORK", "Contracts guarantee callers for a term. Projects take the engineers' time.", [
+        ("OFFERS", "work on the teleprinter: deadline, fee, penalty"),
+        ("ACCEPT / DROP n", "take an offer, or turn it down (up to 3 live)"),
+        ("CLOSE n", "call a live job in early; paid for the term served"),
+        ("WORKS / BUILD <name>", "engineering projects, and starting one"),
+        ("UPGRADES", "equipment the engineers can fit (order on BUY)"),
+        ("PROJECT", "what the engineers are on, and the time left"),
+    ]),
+    ("WORLD", "THE WORLD", "Things happen while the machine runs. Some of them want an answer.", [
+        ("INCIDENT / DECIDE <word>", "the question waiting; unanswered, its default"),
+        ("RIVAL", "the other bureau in town, once there is one"),
+        ("MODS", "good and bad turns in force, and for how long"),
+        ("EFFECTS", "every trade pushing the business, + and -"),
+        ("NEWS / LOG", "console messages; the system journal"),
+        ("AWAY", "the report from the last time you were gone"),
+    ]),
+    ("BUREAU", "THE BUREAU", "Outgrow the room, own the building, sell up, start again better.", [
+        ("SITES / MOVE n", "bigger premises; the machine is off in the van"),
+        ("GOAL", "the building, and how far off it is"),
+        ("PRESTIGE", "sell up once the building is ours; start again"),
+        ("SETTINGS", "the clock and the mode (or TICK n / MODE)"),
+        ("BYE", "hang up"),
+    ]),
+]
 
-Anything else is an unrecognised command and gets journalled as one.
 
-"""
+def _render_help(sections):
+    out = ["HELP <tab> for one part: " + " ".join(k for k, *_ in sections), ""]
+    for key, title, intro, rows in sections:
+        if key == "DAY":
+            continue                     # the full manual has every command anyway
+        out.append(title)
+        out.append("  " + intro)
+        out += ["  %-26s %s" % row for row in rows]
+        out.append("")
+    out.append("Anything else is an unrecognised command and gets journalled as one.")
+    return "\n".join(out) + "\n\n"
+
+
+HELP = _render_help(HELP_SECTIONS)
 
 # ---- balance: measured 2026-11-17, see tools/sweep.sh for the runs ----
 BALANCE = {
@@ -299,7 +338,7 @@ MODS = [
 # player who already knows the game loses nothing by skipping them.
 #   teach   accept  an ordinary small job
 #           lines   wants `extra` more callers than we can carry when offered,
-#                   so ACCEPT's own refusal points at BUY LINES / BUY CORES
+#                   so ACCEPT's own refusal points at the buy sheet
 #           repair  breaks a working line; paid once that line is back up
 #           close   a long job meant to be called in early with CLOSE
 #   hint    printed under the offer; {id} {want} {capacity} {line} {fee} fill in
@@ -310,7 +349,7 @@ LESSONS = [
     {"teach": "lines", "company": "NORTHFIELD DAIRY", "work": "DELIVERY SCHEDULE",
      "extra": 4, "duration": 120, "fee": 60.0,
      "hint": "WE CARRY {capacity}, THEY WANT {want}. A LINE CARRIES ONE CALLER "
-             "AND A MODULE FEEDS EIGHT LINES: BUY LINES, AND A MODULE WHEN THE "
+             "AND A MODULE FEEDS EIGHT LINES. TYPE BUY: LINES, AND A MODULE WHEN THE "
              "LINES OUTRUN IT."},
     {"teach": "repair", "company": "THE TELEPHONE PEOPLE", "work": "CALL-OUT REFUND",
      "fee": 15.0,
@@ -348,10 +387,12 @@ INCIDENTS = [
      "while": {"demand_mult": 0.95}, "ticks": 120, "default": "REFUSE",
      "choices": [
          ("REFUND", "give them the time back", {"money": -20.0, "rep": 0.6,
+                                               "account": ("CROWN MILLS", 2),
                                                "say": "REFUNDED. CROWN MILLS TELL THEIR FRIENDS."}),
          ("SPLIT", "meet them halfway", {"money": -10.0, "rep": 0.2,
                                          "say": "SPLIT THE DIFFERENCE. NOBODY IS DELIGHTED."}),
          ("REFUSE", "their operator, their problem", {"rep": -0.8,
+                                                     "account": ("CROWN MILLS", -2),
                                                      "say": "REFUSED. CROWN MILLS TELL THEIR FRIENDS."}),
      ]},
     {"key": "fan", "title": "A COOLING FAN IS SCREAMING",
@@ -373,6 +414,10 @@ INCIDENTS = [
      "choices": [
          ("HIRE", "40 for the work", {"money": -40.0,
                                       "mod": ("NEW BILLING PROGRAM", 1440, {"rate_mult": 1.06}, True),
+                                      "later": {"ticks": 2880, "company": "POLYTECHNIC SOFTWARE",
+                                                "work": "PAYROLL PACKAGE", "goodwill": 2,
+                                                "say": "THE STUDENT HAS STARTED A FIRM, AND "
+                                                       "WANTS US TO RUN ITS FIRST CLIENT."},
                                       "say": "THE NEW BILLING RUN CATCHES MINUTES WE NEVER KNEW WE LOST."}),
          ("DECLINE", "the old program works", {"say": "HE GOES TO WORK FOR THE COMPETITION."}),
      ]},
@@ -416,5 +461,149 @@ INCIDENTS = [
                                            "say": "THE CLERK COMES BACK WITH 18 AND A BLACK EYE."}),
          ("RIDE", "let it ride", {"mod": ("BAD DEBTS", 600, {"rate_mult": 0.97}, False),
                                   "say": "0047 KEEPS DIALLING. SO DO HIS FRIENDS."}),
+     ]},
+]
+
+# ---- the plant ages, and better machines can be bought -------------------------
+# Every module and line has an age. A unit's breakdown odds rise by its base
+# again every WEAR_TICKS (three days), up to WEAR_CAP times; a breakdown picks
+# worn units first. SERVICE makes a unit as good as new; REPLACE swaps a module
+# for a new one, of any model on sale.
+WEAR_TICKS = 4320
+WEAR_CAP = 4.0
+
+SERVICE_TICKS = 60            # a module is out of the rack while it is serviced
+SERVICE_RATE = 0.25           # ...for this share of its model's price
+LINE_SERVICE_TICKS = 120      # the exchange overhauls every line at once
+LINE_SERVICE_RATE = 0.3       # ...for this share of a line's price, per line
+LINE_SERVICE_WHILE = {"capacity_mult": 0.85}
+TRADE_IN_RATE = 0.4           # a working module is worth this much towards a new one
+
+# HARDWARE (above) is the standard issue for each cycle. Any model up to one
+# generation past your cycle's standard is on sale; the one ahead costs more.
+AHEAD_PREMIUM = 1.6
+
+# ---- your price --------------------------------------------------------------
+# PRICE n sets what we charge, in per cent of the list rate. Callers fall away
+# as it rises (demand x price ** -ELASTICITY); above FAIR they also grumble, and
+# reputation slips by PRICE_REP a tick for every point over.
+PRICE_MIN, PRICE_MAX = 50, 200
+PRICE_ELASTICITY = 1.3
+PRICE_FAIR = 125
+PRICE_REP = 0.0004
+
+# ---- customers who remember -----------------------------------------------------
+# Every company that sends work has goodwill, from -3 to +3. Served in full: +1.
+# Shorted or dropped mid-job: -1, and at -1 or worse they tell their friends.
+# Goodwill sizes their next job and its fee; at BLACKLIST they stop calling.
+GOODWILL_FEE = 0.15           # fee x (1 + this x goodwill)
+GOODWILL_SIZE = 0.2           # a returning customer wants this much more per point
+GOODWILL_REP = 0.5            # extra reputation lost when an unhappy one talks
+BLACKLIST = -2
+
+# ---- staff are people -----------------------------------------------------------
+# Experience brings levels; each level above the first adds STAFF_LEVEL_GAIN of a
+# role's effect again. A level-up brings a request for a raise (a decision).
+# Refused, a person sulks; a sulking person may leave. People fall ill.
+STAFF_LEVEL_TICKS = [0, 1440, 4320]     # experience for levels 1, 2 and 3
+STAFF_LEVEL_GAIN = 0.5
+STAFF_RAISE = 0.3                       # a raise adds this share to a salary
+STAFF_SICK_EVERY = 60                   # ticks between sickness rolls
+STAFF_SICK_CHANCE = 0.006               # per person per roll: about once in a week
+STAFF_SICK_TICKS = (180, 600)
+STAFF_QUIT_CHANCE = 0.03                # per roll, for someone sulking
+TRAIN_TICKS = 480                       # a course takes them away this long
+TRAIN_COST = 1.0                        # ...for this many times the hiring fee
+
+# ---- engineering works ------------------------------------------------------------
+# Built by the engineers, one job at a time (BUILD <name>), and kept for the
+# rest of the cycle. `needs` is a work that must be finished first.
+WORKS = {
+    "JOB SCHEDULER": {
+        "price": 280.0, "ticks": 360, "needs": None,
+        "effects": {"slots_add": 3, "queue_rate": 0.08},
+        "desc": "a program that packs batch jobs tighter into the slots",
+    },
+    "LINE SCANNER": {
+        "price": 350.0, "ticks": 480, "needs": None,
+        "effects": {"fault_mult": 0.85},
+        "desc": "tests every line at three in the morning and logs the weak ones",
+    },
+    "MODEM POOL": {
+        "price": 600.0, "ticks": 720, "needs": None,
+        "effects": {"demand_flat": 4},
+        "desc": "callers who got an engaged tone are held for the next free line",
+    },
+    "BILLING TO THE SECOND": {
+        "price": 400.0, "ticks": 480, "needs": "JOB SCHEDULER",
+        "effects": {"rate_mult": 1.05},
+        "desc": "the accounting run charges for every second, not every minute",
+    },
+    "REMOTE DIAGNOSTICS": {
+        "price": 450.0, "ticks": 600, "needs": "LINE SCANNER",
+        "effects": {"repair_mult": 0.75},
+        "desc": "the engineer finds the fault from the console before going upstairs",
+    },
+    "SECOND POWER FEED": {
+        "price": 900.0, "ticks": 960, "needs": "REMOTE DIAGNOSTICS",
+        "effects": {"capacity_mult": 1.03, "fault_mult": 0.92},
+        "desc": "a second cable from the substation; the machine stops browning out",
+    },
+}
+
+# ---- the rival bureau ---------------------------------------------------------------
+# Opens RIVAL_ARRIVES ticks into a run. Takes up to RIVAL_TAKE of our market at
+# full strength and equal prices, more if we are dearer. Grows by itself, shrinks
+# while our reputation is high, and goes bust if it shrinks to nothing.
+RIVALS = [
+    ("DATALINK BUREAU LTD", "THE CORN EXCHANGE"),
+    ("MERCIA COMPUTING", "STATION ROAD"),
+    ("ACORN DATA SERVICES", "THE OLD MILL"),
+]
+RIVAL_ARRIVES = 2880
+RIVAL_EVERY = 360             # ticks between its moves
+RIVAL_TAKE = 0.25
+RIVAL_MAX_TAKE = 0.6
+RIVAL_GROWTH = 0.0003         # strength a tick, 0 to 1
+RIVAL_SHRINK = 0.0005         # a tick, while our reputation is at RIVAL_REP_BEATS or more
+RIVAL_REP_BEATS = 10.0
+RIVAL_MOVES = [               # move, weight
+    ("cut", 3), ("raise", 2), ("advert", 2), ("undercut", 2),
+    ("poach_account", 2), ("poach_staff", 1),
+]
+
+# ---- the bank -------------------------------------------------------------------------
+# BORROW n up to a limit; interest is paid out of cash every tick; after
+# LOAN_TERM the bank takes what it is owed, overdrawn or not. Cut off by the
+# exchange, we are written off and the bank will not lend again for a while.
+LOAN_RATE_DAY = 0.02          # interest per day on what is owed
+LOAN_TERM = 14400             # ten days
+LOAN_LIMIT_BASE = 200.0
+LOAN_LIMIT_PLANT = 0.5        # plus this share of what the plant cost
+LOAN_BARRED = 4320            # ticks after a liquidation before the bank will talk
+
+# Decisions the game raises itself, never rolled at random. {name}, {role} and
+# {rival} are filled in. Outcomes may also hold: pay (a raise, as a share of
+# salary), morale (+1 or -1), leave (they go).
+TRIGGERED_INCIDENTS = [
+    {"key": "raise", "title": "{name} WANTS A RAISE",
+     "text": "{role} {name} HAS LEARNT THE MACHINE AND KNOWS IT. A RAISE OF A "
+             "THIRD, OR {name} STARTS LOOKING AT THE SITUATIONS VACANT.",
+     "while": {}, "ticks": 240, "default": "REFUSE",
+     "choices": [
+         ("PAY", "a third more salary", {"pay": 0.3, "morale": 1,
+                                         "say": "{name} IS PLEASED, AND SAYS SO."}),
+         ("REFUSE", "not this year", {"morale": -1,
+                                      "say": "{name} SAYS NOTHING, WHICH IS WORSE."}),
+     ]},
+    {"key": "poach", "title": "{rival} OFFER {name} A JOB",
+     "text": "{rival} HAVE OFFERED {role} {name} MORE MONEY TO WORK FOR THEM. "
+             "{name} WOULD STAY FOR A MATCH.",
+     "while": {}, "ticks": 120, "default": "LET",
+     "choices": [
+         ("MATCH", "two fifths more salary", {"pay": 0.4, "morale": 1,
+                                              "say": "{name} STAYS. {rival} ARE ANNOYED."}),
+         ("LET", "let {name} go", {"leave": True,
+                                   "say": "{name} CLEARS THE DESK ON FRIDAY."}),
      ]},
 ]

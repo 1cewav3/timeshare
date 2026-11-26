@@ -27,6 +27,12 @@ INT_KEYS = {"start_cores", "start_lines", "demand_ceiling", "fault_roll_every"}
 # --------------------------------------------------------------------------
 # world
 # --------------------------------------------------------------------------
+def new_staff(name):
+    """A person on the payroll: experience, mood, pay, and any absence."""
+    return {"name": name, "level": 1, "xp": 0, "morale": 0, "pay": 1.0,
+            "away_until": 0, "away_why": "", "wants_raise": False}
+
+
 class World:
     FIELDS = ("money", "cores", "lines", "subs", "rep", "ticks", "last_tick", "tier", "queue")
 
@@ -69,6 +75,17 @@ class World:
                                             # a brand-new world starts at zero
         self.run = self.new_run()  # this run's record, printed if it ends in liquidation
         self.project = None        # {"name", "left", "total", "while", "then"}: one at a time
+        self.price = 100           # per cent of the list rate, see PRICE
+        self.accounts = {}         # company -> {"goodwill", "met", "short", "gone_until"}
+        self.later = []            # follow-ups promised by past decisions: [{"at", ...}]
+        self.rival = None          # the bureau across town, see RIVAL
+        self.rival_next = C.RIVAL_ARRIVES   # tick the next rival opens, while there is none
+        self.loan = None           # {"owed", "due"}
+        self.bank_barred = 0       # tick until which the bank will not lend
+        self.works = set()         # engineering works finished this cycle
+        self.modules = []          # one per module: {"model": name, "born": tick installed}
+        self.line_born = []        # one per line: tick installed
+        self.units_dirty = True
         self.incident = None       # {"key", "left"}: a question waiting for the operator
         self.statement = ""        # the last final statement
         self.subs = int(self.demand)      # after the tycoon fields, demand reads them
@@ -128,18 +145,27 @@ class World:
     def active(self):
         return [c for c in self.contracts if c["state"] == "active"]
 
-    def offer_contract(self, rng):
+    def offer_contract(self, rng, company=None, force=False):
         b = C.BALANCE
-        if len(self.offer_slots()) >= b["contract_max_pending"]:
+        if len(self.offer_slots()) >= b["contract_max_pending"] and not force:
             return
-        company, work = rng.choice(C.CONTRACT_COMPANIES)
+        if company is None:
+            # customers who blacklisted us, or who the rival has for now, do not call
+            willing = [(n, w) for n, w in C.CONTRACT_COMPANIES
+                       if self.account(n)["goodwill"] > C.BLACKLIST
+                       and self.account(n)["gone_until"] <= self.ticks]
+            if not willing:
+                return
+            company = rng.choice(willing)
+        company, work = company
+        g = self.account(company)["goodwill"]
         # work is sized against what you can actually staff, not against demand:
-        # demand grows during the term, so an offer pitched at capacity is a trap
-        want = max(3, int(self.capacity * rng.choice((0.5, 0.6, 0.75, 0.9))))
-        if want < 3:
-            return
+        # demand grows during the term, so an offer pitched at capacity is a trap.
+        # A customer who was served well comes back with more.
+        size = rng.choice((0.5, 0.6, 0.75, 0.9)) * (1.0 + C.GOODWILL_SIZE * max(0, g))
+        want = max(3, int(self.capacity * size))
         duration = rng.choice((200, 300, 420))
-        fee = round(want * b["contract_fee_per_caller"], 0)
+        fee = round(want * b["contract_fee_per_caller"] * (1.0 + C.GOODWILL_FEE * g), 0)
         penalty = round(fee * b["contract_penalty_rate"], 0)
         c = {"id": self.next_contract_id, "company": company, "work": work,
              "want": want, "duration": duration, "ticks_left": duration,
@@ -182,6 +208,44 @@ class World:
                 self.db.execute("INSERT OR REPLACE INTO pending (kind, data) VALUES (?,?)",
                                 (kind, json.dumps(obj)))
 
+    BUSINESS = ("accounts", "later", "rival", "loan")
+
+    def save_business(self):
+        """Price, customers, promises, the rival, the loan and the staff."""
+        if self.db is None:
+            return
+        self.put("price", self.price)
+        self.put("bank_barred", self.bank_barred)
+        rival = self.rival if self.rival else {"next": self.rival_next}
+        for kind, obj in (("accounts", self.accounts), ("later", self.later),
+                          ("rival", rival), ("loan", self.loan)):
+            self.db.execute("INSERT OR REPLACE INTO pending (kind, data) VALUES (?,?)",
+                            (kind, json.dumps(obj)))
+        for role, info in self.staff.items():
+            self.db.execute("INSERT OR REPLACE INTO staff (role, name, level, data) "
+                            "VALUES (?,?,?,?)", (role, info["name"], info.get("level", 1),
+                                                 json.dumps(info)))
+
+    def save_units(self):
+        if self.db is None or not self.units_dirty:
+            return
+        self.sync_units()
+        self.db.execute("DELETE FROM unit")
+        self.db.executemany("INSERT INTO unit (kind, n, model, born) VALUES (?,?,?,?)",
+                            [("module", i + 1, m["model"], m["born"])
+                             for i, m in enumerate(self.modules)]
+                            + [("line", i + 1, None, b) for i, b in enumerate(self.line_born)])
+        self.units_dirty = False
+
+    def load_units(self):
+        if self.db is None:
+            return
+        rows = self.db.execute("SELECT kind, n, model, born FROM unit ORDER BY kind, n").fetchall()
+        self.modules = [{"model": m, "born": b} for k, _n, m, b in rows if k == "module"]
+        self.line_born = [b for k, _n, _m, b in rows if k == "line"]
+        self.units_dirty = False
+        self.sync_units()                  # a save from before ages starts everything new
+
     def load_pending(self):
         if self.db is None:
             return
@@ -189,12 +253,27 @@ class World:
             obj = json.loads(data)
             if kind == "project":
                 self.project = obj
-            elif kind == "incident" and any(i["key"] == obj["key"] for i in C.INCIDENTS):
+            elif kind == "incident" and any(i["key"] == obj["key"] for i in
+                                            C.INCIDENTS + C.TRIGGERED_INCIDENTS):
                 self.incident = obj
+            elif kind == "accounts":
+                self.accounts = obj or {}
+            elif kind == "later":
+                self.later = obj or []
+            elif kind == "loan":
+                self.loan = obj
+            elif kind == "rival":
+                if obj and "name" in obj:
+                    self.rival = obj
+                elif obj:
+                    self.rival_next = int(obj.get("next", self.rival_next))
+        if self.db.execute("SELECT 1 FROM pending WHERE kind='rival'").fetchone() is None:
+            # a save from before the rival: give it the same two days' grace
+            self.rival_next = self.ticks + C.RIVAL_ARRIVES
 
-    def start_project(self, name, ticks, while_, then):
+    def start_project(self, name, ticks, while_, then, offline=None):
         self.project = {"name": name, "left": int(ticks), "total": int(ticks),
-                        "while": dict(while_ or {}), "then": then}
+                        "while": dict(while_ or {}), "then": then, "offline": offline}
         self.save_pending()
         self.journal("%s BEGAN: %s." % (name, span(ticks)), "project", ticks)
 
@@ -218,13 +297,47 @@ class World:
                                 ("up:" + then["upgrade"],))
         if then.get("mod"):
             self.add_mod(*then["mod"])
+        if then.get("work"):
+            self.works.add(then["work"])
+            self.put("work:" + then["work"], 1)
+        renew = then.get("renew")
+        if renew:
+            self.sync_units()
+            if renew[0] == "module" and int(renew[1]) <= self.cores:
+                self.modules[int(renew[1]) - 1]["born"] = self.ticks
+            elif renew[0] == "lines":
+                self.line_born = [self.ticks] * self.lines
+            self.units_dirty = True
         self.save_pending()
         msg = "%s FINISHED." % p["name"]
         self.queue.append(msg)
         self.journal(msg, "project", p["total"])
 
     def incident_def(self):
-        return next(i for i in C.INCIDENTS if i["key"] == self.incident["key"])
+        """The open incident, its text filled in with who and what it is about."""
+        base = next(i for i in C.INCIDENTS + C.TRIGGERED_INCIDENTS
+                    if i["key"] == self.incident["key"])
+        ctx = self.incident.get("ctx")
+        if not ctx:
+            return base
+
+        def f(t):
+            return t.format(**ctx)
+        return dict(base, title=f(base["title"]), text=f(base["text"]),
+                    choices=[(w, f(d), dict(o, say=f(o.get("say", "DONE."))))
+                             for w, d, o in base["choices"]])
+
+    def raise_incident(self, key, ctx):
+        """Open a decision the game itself brings up. False if one is already open."""
+        if self.incident:
+            return False
+        inc = next(i for i in C.TRIGGERED_INCIDENTS if i["key"] == key)
+        self.incident = {"key": key, "left": inc["ticks"], "ctx": ctx}
+        self.save_pending()
+        title = self.incident_def()["title"]
+        self.queue.append("DECISION WAITING: %s. TYPE INCIDENT." % title)
+        self.journal("DECISION WAITING: %s." % title, "incident", inc["ticks"])
+        return True
 
     def roll_incident(self, rng):
         if self.incident or self.lesson_next < len(C.LESSONS):
@@ -266,6 +379,21 @@ class World:
         if out.get("project"):
             name, ticks, while_, then_mod = out["project"]
             self.start_project(name, ticks, while_, {"mod": then_mod} if then_mod else {})
+        if out.get("account"):
+            self.goodwill_change(out["account"][0], out["account"][1])
+        if out.get("later"):
+            later = dict(out["later"])
+            later["at"] = self.ticks + later.pop("ticks")
+            self.later.append(later)
+        role = (self.incident.get("ctx") or {}).get("role")
+        if role in self.staff:
+            info = self.staff[role]
+            if out.get("pay"):
+                info["pay"] = round(info.get("pay", 1.0) * (1.0 + out["pay"]), 3)
+            if out.get("morale"):
+                info["morale"] = max(-2, min(2, info.get("morale", 0) + out["morale"]))
+            if out.get("leave"):
+                self.staff_leaves(role, "LEFT FOR %s" % (self.rival or {}).get("name", "ANOTHER BUREAU"))
         self.incident = None
         self.save_pending()
         say = ("NOBODY ANSWERED. " if by_default else "") + out.get("say", "DONE.")
@@ -297,6 +425,189 @@ class World:
         self.journal("FAULT: %s %d DOWN" % (kind.upper(), n), "fault", before)
         self.run["faults"] += 1
         return n
+
+    # -- customers who remember ---------------------------------------------------
+    def account(self, company):
+        return self.accounts.setdefault(company, {"goodwill": 0, "met": 0, "short": 0,
+                                                  "gone_until": 0})
+
+    def goodwill_change(self, company, delta, tally=None):
+        a = self.account(company)
+        before = a["goodwill"]
+        a["goodwill"] = max(-3, min(3, before + delta))
+        if tally:
+            a[tally] += 1
+        if delta < 0 and a["goodwill"] <= -1:
+            # an unhappy customer talks
+            self.rep = max(0.0, self.rep - C.GOODWILL_REP)
+        if before > C.BLACKLIST >= a["goodwill"]:
+            msg = "%s WILL NOT SEND US WORK AGAIN." % company
+            self.queue.append(msg)
+            self.journal(msg, "account")
+        elif before < 2 <= a["goodwill"]:
+            msg = "%s NOW SEND US THEIR BEST WORK." % company
+            self.queue.append(msg)
+            self.journal(msg, "account")
+
+    def keep_promises(self):
+        """Follow-ups that past decisions set in motion arrive when due."""
+        due = [x for x in self.later if x["at"] <= self.ticks]
+        if not due:
+            return
+        self.later = [x for x in self.later if x["at"] > self.ticks]
+        for x in due:
+            a = self.account(x["company"])
+            a["goodwill"] = max(a["goodwill"], x.get("goodwill", 0))
+            self.queue.append(x["say"])
+            self.journal(x["say"], "account")
+            self.offer_contract(random.Random(self.ticks), company=(x["company"], x["work"]),
+                                force=True)
+
+    # -- staff are people ---------------------------------------------------------
+    def staff_level(self, xp):
+        return 1 + sum(1 for t in C.STAFF_LEVEL_TICKS[1:] if xp >= t)
+
+    def staff_leaves(self, role, why):
+        who = self.staff.pop(role, None)
+        if who is None:
+            return
+        if self.db is not None:
+            self.db.execute("DELETE FROM staff WHERE role=?", (role,))
+        msg = "%s %s HAS %s." % (role, who["name"], why)
+        self.queue.append(msg)
+        self.journal(msg, "staff")
+        if self.rival and "LEFT FOR" in why:
+            self.rival["strength"] = min(1.0, self.rival["strength"] + 0.05)
+
+    def tend_staff(self, rng):
+        for role, info in list(self.staff.items()):
+            away = info.get("away_until", 0)
+            if away and away <= self.ticks:
+                why = info.get("away_why", "")
+                info["away_until"], info["away_why"] = 0, ""
+                if why == "TRAINING":
+                    nxt = C.STAFF_LEVEL_TICKS[min(info["level"], len(C.STAFF_LEVEL_TICKS) - 1)]
+                    info["xp"] = max(info["xp"], nxt)
+                msg = "%s %s IS BACK%s." % (role, info["name"],
+                                            " FROM THE COURSE" if why == "TRAINING" else "")
+                self.queue.append(msg)
+                self.journal(msg, "staff")
+            if info.get("away_until", 0) > self.ticks:
+                continue
+            info["xp"] = info.get("xp", 0) + 1
+            level = min(3, self.staff_level(info["xp"]))
+            if level > info.get("level", 1):
+                info["level"] = level
+                info["wants_raise"] = True
+                msg = "%s %s IS NOW LEVEL %d." % (role, info["name"], level)
+                self.queue.append(msg)
+                self.journal(msg, "staff")
+        if self.ticks % C.STAFF_SICK_EVERY == 0:
+            for role, info in list(self.staff.items()):
+                if info.get("away_until", 0) > self.ticks:
+                    continue
+                if info.get("morale", 0) < 0 and rng.random() < C.STAFF_QUIT_CHANCE:
+                    self.staff_leaves(role, "LEFT FOR %s" % (self.rival or {}).get(
+                        "name", "ANOTHER BUREAU"))
+                elif rng.random() < C.STAFF_SICK_CHANCE:
+                    info["away_until"] = self.ticks + rng.randint(*C.STAFF_SICK_TICKS)
+                    info["away_why"] = "SICK"
+                    msg = "%s %s IS OFF SICK." % (role, info["name"])
+                    self.queue.append(msg)
+                    self.journal(msg, "staff")
+        for role, info in self.staff.items():
+            if info.get("wants_raise") and not self.incident:
+                if self.raise_incident("raise", {"name": info["name"], "role": role,
+                                                 "rival": (self.rival or {}).get("name", "")}):
+                    info["wants_raise"] = False
+                break
+
+    # -- the rival bureau ---------------------------------------------------------
+    def tend_rival(self, rng):
+        if not self.rival:
+            if self.ticks >= self.rival_next:
+                last = getattr(self, "last_rival", None)
+                pool = [r for r in C.RIVALS if r[0] != last] or C.RIVALS
+                name, where = rng.choice(pool)
+                self.rival = {"name": name, "where": where, "strength": 0.2,
+                              "price": 90, "born": self.ticks}
+                self.last_rival = name
+                msg = "%s HAVE OPENED AT %s, AND CHARGE %d%% OF OUR LIST RATE." % (
+                    name, where, self.rival["price"])
+                self.queue.append(msg)
+                self.journal(msg, "rival")
+            return
+        r = self.rival
+        r["strength"] = min(1.0, r["strength"] + C.RIVAL_GROWTH)
+        if self.rep >= C.RIVAL_REP_BEATS:
+            r["strength"] -= C.RIVAL_SHRINK
+        if r["strength"] <= 0.0:
+            msg = "%s HAVE GONE INTO RECEIVERSHIP. THEIR CUSTOMERS ARE RINGING US." % r["name"]
+            self.queue.append(msg)
+            self.journal(msg, "rival")
+            self.rival = None
+            self.rival_next = self.ticks + 2 * C.RIVAL_ARRIVES
+            return
+        if (self.ticks - r["born"]) % C.RIVAL_EVERY or self.ticks == r["born"]:
+            return
+        move = rng.choices([m for m, _w in C.RIVAL_MOVES],
+                           weights=[w for _m, w in C.RIVAL_MOVES])[0]
+        msg = None
+        if move == "cut" and r["price"] > 70:
+            r["price"] -= 10
+            msg = "%s HAVE CUT THEIR RATE TO %d%% OF OUR LIST." % (r["name"], r["price"])
+        elif move == "raise" and r["price"] < 150:
+            r["price"] += 10
+            msg = "%s HAVE PUT THEIR RATE UP TO %d%% OF OUR LIST." % (r["name"], r["price"])
+        elif move == "advert":
+            r["strength"] = min(1.0, r["strength"] + 0.1)
+            msg = "%s ARE ADVERTISING IN THE EVENING ARGUS." % r["name"]
+        elif move == "undercut":
+            offers = [c for c in self.offers() if not c.get("lesson")]
+            if offers:
+                c = offers[0]
+                self.drop_contract(c["id"])
+                msg = "%s UNDERCUT US ON THE %s JOB (OFFER %d). IT HAS GONE TO THEM." % (
+                    r["name"], c["company"], c["id"])
+        elif move == "poach_account":
+            names = [n for n, _w in C.CONTRACT_COMPANIES]
+            weak = [n for n in names if self.account(n)["goodwill"] <= 0
+                    and self.account(n)["gone_until"] <= self.ticks]
+            if weak:
+                n = rng.choice(weak)
+                self.account(n)["gone_until"] = self.ticks + 2 * 1440
+                msg = "%s HAVE TAKEN %s'S WORK FOR NOW." % (r["name"], n)
+        elif move == "poach_staff" and self.staff:
+            role = max(self.staff, key=lambda k: (self.staff[k].get("level", 1),
+                                                  -self.staff[k].get("morale", 0)))
+            info = self.staff[role]
+            self.raise_incident("poach", {"name": info["name"], "role": role,
+                                          "rival": r["name"]})
+        if msg:
+            self.queue.append(msg)
+            self.journal(msg, "rival")
+
+    # -- the bank -----------------------------------------------------------------
+    def plant_value(self):
+        self.sync_units()
+        return (sum(self.model(m["model"])["price_core"] for m in self.modules)
+                + self.lines * C.BALANCE["price_line"])
+
+    def loan_limit(self):
+        if self.ticks < self.bank_barred:
+            return 0.0
+        trust = max(0.3, min(1.0, self.rep / 5.0))
+        limit = (C.LOAN_LIMIT_BASE + C.LOAN_LIMIT_PLANT * self.plant_value()) * trust
+        return max(0.0, limit - (self.loan["owed"] if self.loan else 0.0))
+
+    def tend_loan(self):
+        if self.loan and self.ticks >= self.loan["due"]:
+            owed = self.loan["owed"]
+            self.money -= owed
+            self.loan = None
+            msg = "THE LOAN FELL DUE. THE BANK TOOK %.2f." % owed
+            self.queue.append(msg)
+            self.journal(msg, "bank", owed)
 
     # -- the first offers teach the game ---------------------------------------
     def teach(self):
@@ -423,8 +734,16 @@ class World:
         self.owned = {r[0][3:] for r in self.db.execute(
             "SELECT name FROM upgrade WHERE name LIKE 'up:%'")}
         self.staff = {}
-        for role, nm, lvl in self.db.execute("SELECT role, name, level FROM staff"):
-            self.staff[role] = {"name": nm, "level": lvl}
+        for role, nm, lvl, data in self.db.execute("SELECT role, name, level, data FROM staff"):
+            info = new_staff(nm)
+            info.update(json.loads(data) if data else {"level": lvl or 1})
+            self.staff[role] = info
+        row = self.db.execute("SELECT n FROM upgrade WHERE name='price'").fetchone()
+        self.price = int(row[0]) if row else 100
+        row = self.db.execute("SELECT n FROM upgrade WHERE name='bank_barred'").fetchone()
+        self.bank_barred = int(row[0]) if row else 0
+        self.works = {r[0][5:] for r in self.db.execute(
+            "SELECT name FROM upgrade WHERE name LIKE 'work:%'") if r[0][5:] in C.WORKS}
         self.mods = [{"name": n, "ticks_left": int(t), "effects": json.loads(e), "good": bool(g)}
                      for n, t, e, g in self.db.execute(
                          "SELECT name, ticks_left, effects, good FROM mod")]
@@ -469,6 +788,11 @@ class World:
         self.project = None
         self.incident = None
         self.save_pending()
+        self.modules, self.line_born = [], []
+        self.sync_units()
+        self.price, self.accounts, self.later = 100, {}, []
+        self.rival, self.rival_next = None, C.RIVAL_ARRIVES
+        self.loan, self.works = None, set()
         self.mark_seen()
         self.subs = int(self.demand)
         self.queue.append("A NEW MACHINE ARRIVES ON MONDAY MORNING.")
@@ -539,6 +863,8 @@ class World:
              self.tick_seconds),
         )
         self.save_run()
+        self.save_units()
+        self.save_business()
 
     def journal(self, line, kind="op", val=None):
         """One row per thing that happened, stamped with the tick, the cash and
@@ -577,9 +903,14 @@ class World:
         eff["queue_rate"] = C.BALANCE["queue_rate"]
         sources = []
         for role in self.staff:
-            sources.append(C.ROLES[role]["effects"])
+            sources.append(self.staff_effects(role))
         for name in self.owned:
             sources.append(C.UPGRADES[name]["effects"])
+        for name in self.works:
+            sources.append(C.WORKS[name]["effects"])
+        sources.append(self.price_effects())
+        if self.rival:
+            sources.append({"demand_mult": 1.0 - self.rival_take()})
         for m in self.mods:
             sources.append(m["effects"])
         if self.project:
@@ -602,7 +933,36 @@ class World:
 
     @property
     def salaries(self):
-        return sum(C.ROLES[r]["salary"] for r in self.staff)
+        return sum(C.ROLES[r]["salary"] * i.get("pay", 1.0) for r, i in self.staff.items())
+
+    def price_effects(self):
+        p = self.price / 100.0
+        if abs(p - 1.0) < 1e-9:
+            return {}
+        return {"rate_mult": p, "demand_mult": p ** -C.PRICE_ELASTICITY}
+
+    def rival_take(self):
+        """Share of our market the rival takes: its strength, and how our price
+        compares with its own."""
+        if not self.rival:
+            return 0.0
+        ratio = (self.price / float(self.rival["price"])) ** C.PRICE_ELASTICITY
+        return max(0.0, min(C.RIVAL_MAX_TAKE, C.RIVAL_TAKE * self.rival["strength"] * ratio))
+
+    def staff_effects(self, role):
+        """A role's effects, stronger with experience; nothing while they are away."""
+        info = self.staff[role]
+        if info.get("away_until", 0) > self.ticks:
+            return {}
+        scale = 1.0 + C.STAFF_LEVEL_GAIN * (info.get("level", 1) - 1)
+        out = {}
+        for k, v in C.ROLES[role]["effects"].items():
+            out[k] = 1.0 + (v - 1.0) * scale if k.endswith("_mult") else v * scale
+        return out
+
+    @property
+    def interest(self):
+        return self.loan["owed"] * C.LOAN_RATE_DAY / 1440.0 if self.loan else 0.0
 
     @property
     def hardware(self):
@@ -611,6 +971,80 @@ class World:
     @property
     def hw_name(self):
         return self.hardware["name"]
+
+    # -- the plant, unit by unit --------------------------------------------------
+    def sync_units(self):
+        """Keep one record per module and per line. Anything that changes the
+        counts without saying which unit (old saves, tests, the sweep) gets new
+        standard-issue units at the end, or loses them from the end."""
+        if len(self.modules) != self.cores:
+            del self.modules[self.cores:]
+            while len(self.modules) < self.cores:
+                self.modules.append({"model": self.hw_name, "born": self.ticks})
+            self.units_dirty = True
+        if len(self.line_born) != self.lines:
+            del self.line_born[self.lines:]
+            self.line_born += [self.ticks] * (self.lines - len(self.line_born))
+            self.units_dirty = True
+
+    def model(self, name):
+        return next((h for h in C.HARDWARE if h["name"] == name), self.hardware)
+
+    def module_model(self, n):
+        self.sync_units()
+        return self.model(self.modules[n - 1]["model"])
+
+    def on_sale(self):
+        """Models that can be bought now, with their price: the cycle's standard,
+        and the next generation at a premium."""
+        top = min(len(C.HARDWARE) - 1, self.prestiges + 1)
+        out = []
+        for i, h in enumerate(C.HARDWARE[:top + 1]):
+            if i < min(self.prestiges, len(C.HARDWARE) - 1):
+                continue                       # an older generation is not made any more
+            price = h["price_core"] * (C.AHEAD_PREMIUM if i > self.prestiges else 1.0)
+            out.append((h, price))
+        return out
+
+    def wear(self, born):
+        age = max(0, self.ticks - born)
+        return min(C.WEAR_CAP, 1.0 + age / float(C.WEAR_TICKS))
+
+    def servicing(self):
+        """The module out of the rack for service, if any."""
+        if self.project and self.project.get("offline"):
+            return int(self.project["offline"])
+        return None
+
+    def working_module_numbers(self):
+        dead = {f["n"] for f in self.faults_of("module")}
+        away = self.servicing()
+        return [n for n in range(1, self.cores + 1) if n not in dead and n != away]
+
+    @property
+    def module_room(self):
+        """Callers the working modules can process, model by model."""
+        self.sync_units()
+        return sum(self.model(self.modules[n - 1]["model"])["core_users"]
+                   for n in self.working_module_numbers())
+
+    @property
+    def module_room_all(self):
+        self.sync_units()
+        return sum(self.model(m["model"])["core_users"] for m in self.modules)
+
+    def fault_chance(self):
+        """The odds of a breakdown at a roll: the base rate, the effects in
+        force, and how worn and how good the plant is on average."""
+        self.sync_units()
+        b = C.BALANCE
+        factors = [self.wear(self.modules[n - 1]["born"])
+                   * self.model(self.modules[n - 1]["model"])["fault_mult"]
+                   for n in self.working_module_numbers()]
+        dead = {f["n"] for f in self.faults_of("line")}
+        factors += [self.wear(born) for i, born in enumerate(self.line_born) if i + 1 not in dead]
+        plant = sum(factors) / len(factors) if factors else 1.0
+        return b["fault_roll_chance"] * self.effects()["fault_mult"] * plant
 
     @property
     def price_growth(self):
@@ -648,19 +1082,16 @@ class World:
 
     @property
     def working_cores(self):
-        return max(0, self.cores - len(self.faults_of("module")))
+        return len(self.working_module_numbers())
 
     @property
     def capacity(self):
-        raw = min(self.working_cores * self.hardware["core_users"],
-                  self.working_lines * C.BALANCE["line_users"])
-        return int(raw * self.effects()["capacity_mult"])
+        return int(self.capacity_raw * self.effects()["capacity_mult"])
 
     @property
     def capacity_raw(self):
         """Capacity before anything scales it: what the lamps can show."""
-        return min(self.working_cores * self.hardware["core_users"],
-                   self.working_lines * C.BALANCE["line_users"])
+        return min(self.module_room, self.working_lines * C.BALANCE["line_users"])
 
     def capacity_why(self):
         """What is moving capacity the way it moved, in a few words for the panel."""
@@ -704,9 +1135,10 @@ class World:
     @property
     def outgoings(self):
         b = C.BALANCE
-        raw = (self.site_rent + self.cores * self.hardware["core_cost"]
+        self.sync_units()
+        raw = (self.site_rent + sum(self.model(m["model"])["core_cost"] for m in self.modules)
                + self.lines * b["line_cost"] + self.salaries)
-        return raw * self.effects()["cost_mult"]
+        return raw * self.effects()["cost_mult"] + self.interest
 
     @property
     def net(self):
@@ -761,9 +1193,7 @@ class World:
         # a break is rolled once every N ticks at a fixed chance, so the odds are
         # legible ("ten per cent every hundred ticks") instead of a per-tick
         # probability nobody can reason about
-        chance = (b["fault_roll_chance"] * self.effects()["fault_mult"]
-                  * self.hardware["fault_mult"])
-        if self.ticks % b["fault_roll_every"] == 0 and rng.random() < chance:
+        if self.ticks % b["fault_roll_every"] == 0 and rng.random() < self.fault_chance():
             self.roll_fault(rng)
 
         # the world changes: buffs and debuffs arrive and expire
@@ -772,6 +1202,12 @@ class World:
         self.expire_mods()
         self.advance_project()
         self.advance_incident(rng)
+        self.tend_staff(rng)
+        self.tend_rival(rng)
+        self.keep_promises()
+        self.tend_loan()
+        if self.price > C.PRICE_FAIR:          # dear, and they say so
+            self.rep = max(0.0, self.rep - C.PRICE_REP * (self.price - C.PRICE_FAIR))
 
         self.earned += self.revenue
         self.run["earned"] += self.revenue
@@ -829,6 +1265,7 @@ class World:
                     continue
                 if c["breached"] > allowed:
                     self.run["short"] += 1
+                    self.goodwill_change(c["company"], -1, "short")
                     self.money -= c["penalty"]
                     self.rep = max(0.0, self.rep - 1.0)
                     self.queue.append("%s: WE SHORTED THEM ON %d OF %d TICKS. PENALTY %.0f CHARGED."
@@ -837,6 +1274,7 @@ class World:
                                  "breach", c["penalty"])
                 else:
                     self.run["met"] += 1
+                    self.goodwill_change(c["company"], +1, "met")
                     self.money += c["fee"]
                     self.rep = min(20.0, self.rep + 0.5)
                     self.queue.append("%s: SERVED. FEE %.0f PAID, ACCOUNT IN GOOD STANDING."
@@ -851,8 +1289,15 @@ class World:
         proceeds = (self.lines * b["price_line"]
                     + self.extra_slots * b["price_slot"]) * b["liquidation_rate"]
         statement = final_statement(self, proceeds)
+        if self.loan:
+            self.journal("THE BANK WROTE OFF %.2f." % self.loan["owed"], "bank",
+                         self.loan["owed"])
+            self.loan = None
+        self.bank_barred = self.ticks + C.LOAN_BARRED
         self.money = max(0.0, self.money + proceeds)
         self.lines = b["start_lines"]
+        self.line_born = [self.ticks] * self.lines
+        self.units_dirty = True
         # every line was sold; the exchange's minimum set arrives working
         self.faults = [f for f in self.faults if f["kind"] != "line"]
         if self.db is not None:
@@ -883,21 +1328,26 @@ class World:
         candidates = []
         working_lines = [i + 1 for i in range(self.lines)
                          if i + 1 not in {f["n"] for f in self.faults_of("line")}]
-        working_cores = [i + 1 for i in range(self.cores)
-                         if i + 1 not in {f["n"] for f in self.faults_of("module")}]
+        working_cores = self.working_module_numbers()
         if len(working_lines) > 1:
             candidates.append("line")
         if len(working_cores) > 1:
             candidates.append("module")
         if not candidates:
             return
+        self.sync_units()
         kind = rng.choice(candidates)
+        # the worn ones go first: each unit is as likely to fail as it is worn
         if kind == "line":
-            n = rng.choice(working_lines)
+            n = rng.choices(working_lines,
+                            weights=[self.wear(self.line_born[i - 1]) for i in working_lines])[0]
             self.add_fault("line", n)
             self.queue.append(rng.choice(C.FAULT_LINE) % n)
         else:
-            n = rng.choice(working_cores)
+            n = rng.choices(working_cores, weights=[
+                self.wear(self.modules[i - 1]["born"])
+                * self.model(self.modules[i - 1]["model"])["fault_mult"]
+                for i in working_cores])[0]
             self.add_fault("module", n)
             self.queue.append(rng.choice(C.FAULT_MODULE) % n)
         self.journal("FAULT: %s %d DOWN" % (kind.upper(), n), "fault", before)
@@ -932,8 +1382,8 @@ def r_status(w):
         "",
         "  SYSTEM REPORT                      TICK %d" % w.ticks,
         "  " + "-" * 52,
-        "  PROCESSING MODULES      %3d   (can serve %d callers, %s generation)"
-        % (w.cores, w.cores * w.hardware["core_users"], w.hw_name),
+        "  PROCESSING MODULES      %3d   (can serve %d callers: %s)"
+        % (w.cores, w.module_room_all, plant_models(w)),
         "  DIAL-IN LINES           %3d   (can carry %d callers)" % (w.lines, w.lines),
         site_line(w),
         capacity_line(w),
@@ -943,6 +1393,11 @@ def r_status(w):
          % ((w.money,) + goal_progress(w))) if not w.won_tick else
         ("  BUILDING                %s - YOURS SINCE TICK %d" % (C.BUILDING_NAME, w.won_tick)),
         contract_line(w),
+        ("  PRICE                   %3d%%  of the list rate" % w.price) if w.price != 100 else "",
+        ("  RIVAL                   %s takes %d%%" % (w.rival["name"], round(100 * w.rival_take())))
+        if w.rival else "",
+        ("  LOAN                    %.2f owed, due in %s" % (w.loan["owed"], short(w.loan["due"] - w.ticks)))
+        if w.loan else "",
         overdraft_line(w),
         idle_lines_line(w),
         "  CALLERS TURNED AWAY     %3d   (busy signal, paid nothing)" % max(0, w.subs - w.served),
@@ -992,6 +1447,23 @@ def span(t):
     if m and not days:
         parts.append("%d MINUTE%s" % (m, "" if m == 1 else "S"))
     return " ".join(parts) or "UNDER A MINUTE"
+
+
+def real_time(seconds):
+    """Wall-clock time, the way the window counts it down: 45S, 7M54S, 2H10M."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return "%dS" % seconds
+    if seconds < 3600:
+        return "%dM%02dS" % (seconds // 60, seconds % 60)
+    return "%dH%02dM" % (seconds // 3600, seconds % 3600 // 60)
+
+
+def both_times(w, ticks):
+    """Bureau time and what that is in real time at the current tick rate."""
+    return "%s OF BUREAU TIME; ABOUT %s AT %d SECOND%s A TICK" % (
+        short(ticks), real_time(ticks * w.tick_seconds), w.tick_seconds,
+        "" if w.tick_seconds == 1 else "S")
 
 
 def short(t):
@@ -1068,8 +1540,10 @@ def away_entries(w, rows, start):
             entries.append((4, at, line))
         elif kind == "record":
             record = (at, int(val or 0))
-        elif kind in ("lesson", "incident", "project"):
+        elif kind in ("lesson", "incident", "project", "bank"):
             entries.append((1, at, line))
+        elif kind in ("rival", "staff", "account"):
+            entries.append((2, at, line))
     if record:
         entries.append((3, record[0], "BUSIEST YET: %d CALLERS AT ONCE." % record[1]))
     if small > 2:                               # everyday business, folded
@@ -1156,10 +1630,445 @@ def r_away(w):
     return "\r\n".join(out) + "\r\n"
 
 
+RULE = "  " + "-" * (REPORT_WIDTH - 2)
+
+
+def ok_err(ok, msg):
+    return ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+
+
+def joined(out):
+    return "\r\n".join(out) + "\r\n"
+
+
+# ---- your price -------------------------------------------------------------
+def r_price(w):
+    p = w.price / 100.0
+    out = ["", "  OUR PRICE", RULE,
+           "  WE CHARGE   %d%% OF THE LIST RATE" % w.price,
+           "  PER CALLER  %.4f A TICK" % (C.BALANCE["rate_per_user"] * w.effects()["rate_mult"])]
+    out.append("  CALLERS     %+d%% FROM THE PRICE ALONE" % round(100 * (p ** -C.PRICE_ELASTICITY - 1)))
+    if w.rival:
+        out.append("  RIVAL       CHARGES %d%%, TAKES %d%% OF CALLERS"
+                   % (w.rival["price"], round(100 * w.rival_take())))
+    if w.price > C.PRICE_FAIR:
+        out.append("  OVER %d%%    REPUTATION %.3f A TICK"
+                   % (C.PRICE_FAIR, -C.PRICE_REP * (w.price - C.PRICE_FAIR)))
+    out.append(RULE)
+    out += fold("  ", "PRICE n SETS IT, %d TO %d. DEARER: MORE PER CALLER, FEWER "
+                      "CALLERS. WORTH IT WHEN MORE CALL THAN WE CAN CARRY."
+                % (C.PRICE_MIN, C.PRICE_MAX))
+    out.append("")
+    return joined(out)
+
+
+def do_price(w, args):
+    try:
+        n = int(args[0].rstrip("%"))
+    except (IndexError, ValueError):
+        return False, "PRICE n   (PER CENT OF THE LIST RATE, %d TO %d)" % (C.PRICE_MIN, C.PRICE_MAX)
+    if not C.PRICE_MIN <= n <= C.PRICE_MAX:
+        return False, "THE PRICE RUNS FROM %d TO %d PER CENT." % (C.PRICE_MIN, C.PRICE_MAX)
+    before = w.served
+    w.price = n
+    w.journal("PRICE SET TO %d%%" % n)
+    return True, ("WE NOW CHARGE %d%% OF THE LIST RATE. DEMAND %d CALLERS (WAS ROUGHLY %d "
+                  "SERVED). NET %+.3f A TICK." % (n, int(w.demand), before, w.net))
+
+
+# ---- customers ----------------------------------------------------------------
+def r_accounts(w):
+    out = ["", "  OUR CUSTOMERS", RULE, "  COMPANY              GOOD MET SHORT"]
+    known = [n for n, _w in C.CONTRACT_COMPANIES] + sorted(
+        n for n in w.accounts if n not in dict(C.CONTRACT_COMPANIES))
+    for n in known:
+        a = w.account(n)
+        note = ""
+        if a["goodwill"] <= C.BLACKLIST:
+            note = "LOST"
+        elif a["gone_until"] > w.ticks:
+            note = "RIVAL'S"
+        elif a["goodwill"] >= 2:
+            note = "BEST"
+        out.append("  %-20s %+3d %3d %4d  %s" % (n[:20], a["goodwill"], a["met"], a["short"], note))
+    out.append(RULE)
+    out += fold("  ", "SERVED IN FULL: +1. SHORTED OR DROPPED: -1, AND THEY TALK. GOODWILL "
+                      "SIZES THEIR NEXT JOB AND ITS FEE. BEST: THEY SEND THEIR BEST WORK. "
+                      "LOST: AT %d THEY STOP CALLING. RIVAL'S: TAKEN FOR NOW." % C.BLACKLIST)
+    out.append("")
+    return joined(out)
+
+
+# ---- staff ----------------------------------------------------------------------
+def r_staff(w):
+    out = ["", "  STAFF", RULE]
+    if not w.staff:
+        out.append("  NOBODY WORKS HERE BUT YOU.")
+    for role, info in w.staff.items():
+        mood = {-2: "BITTER", -1: "SULKING", 0: "", 1: "CONTENT", 2: "LOYAL"}[
+            max(-2, min(2, info.get("morale", 0)))]
+        away = ""
+        if info.get("away_until", 0) > w.ticks:
+            away = "%s, BACK IN %s" % (info["away_why"], short(info["away_until"] - w.ticks))
+        out.append("  %-9s %-11s LEVEL %d  %.2f/TICK" % (role, info["name"], info.get("level", 1),
+                                                       C.ROLES[role]["salary"] * info.get("pay", 1.0)))
+        detail = ", ".join(x for x in (away, mood) if x)
+        if detail:
+            out.append("            " + detail)
+    out.append(RULE)
+    out.append("  SALARIES  %.2f/TICK" % w.salaries)
+    out.append("")
+    for role, data in C.ROLES.items():
+        if role not in w.staff:
+            out.append("  HIRE %-9s %4.0f" % (role, data["fee"]))
+    out.append("  FIRE <role>   TRAIN <role>: A COURSE, LEVEL UP")
+    out.append("")
+    return joined(out)
+
+
+def do_train(w, args):
+    if not args:
+        return False, "TRAIN WHICH ROLE?"
+    role = args[0].upper()
+    if role not in w.staff:
+        return False, "NOBODY WORKS HERE AS %s." % role
+    info = w.staff[role]
+    if info.get("away_until", 0) > w.ticks:
+        return False, "%s IS AWAY (%s)." % (info["name"], info["away_why"])
+    if info.get("level", 1) >= 3:
+        return False, "%s KNOWS ALL THE COURSE COULD TEACH." % info["name"]
+    cost = C.ROLES[role]["fee"] * C.TRAIN_COST
+    if w.money < cost:
+        return False, "INSUFFICIENT FUNDS: THE COURSE COSTS %.2f, CASH %.2f." % (cost, w.money)
+    w.money -= cost
+    info["away_until"], info["away_why"] = w.ticks + C.TRAIN_TICKS, "TRAINING"
+    w.journal("SENT %s %s ON A COURSE FOR %.2f" % (role, info["name"], cost))
+    return True, ("%s GOES ON A COURSE FOR %s, FOR %.2f, AND COMES BACK A LEVEL UP. "
+                  "UNTIL THEN THE %s'S WORK IS NOT DONE." % (info["name"], span(C.TRAIN_TICKS),
+                                                            cost, role))
+
+
+# ---- engineering works -----------------------------------------------------------
+def r_works(w):
+    out = ["", "  ENGINEERING WORKS", RULE]
+    for name, wk in C.WORKS.items():
+        if name in w.works:
+            state = "BUILT"
+        elif w.project and (w.project.get("then") or {}).get("work") == name:
+            state = "UNDER WAY"
+        elif wk["needs"] and wk["needs"] not in w.works:
+            state = "NEEDS " + wk["needs"]
+        else:
+            state = "%.0f, %s" % (wk["price"], short(wk["ticks"]))
+        out.append("  %-22s %s" % (name, state))
+        out += fold("      ", effect_brief(wk["effects"]))
+    out.append(RULE)
+    out.append("  BUILD <NAME>   one job at a time")
+    out.append("")
+    return joined(out)
+
+
+def do_build(w, args):
+    name = " ".join(args).upper()
+    wk = C.WORKS.get(name)
+    if wk is None:
+        return False, "NO SUCH WORK. TYPE WORKS FOR THE LIST."
+    if name in w.works:
+        return False, "%s IS ALREADY BUILT." % name
+    if wk["needs"] and wk["needs"] not in w.works:
+        return False, "%s NEEDS %s FIRST." % (name, wk["needs"])
+    if w.project:
+        return False, ("THE ENGINEERS ARE BUSY WITH %s (%d TICKS LEFT). ONE JOB AT A TIME."
+                       % (w.project["name"], w.project["left"]))
+    if w.money < wk["price"]:
+        return False, "INSUFFICIENT FUNDS: %s COSTS %.2f, CASH %.2f." % (name, wk["price"], w.money)
+    w.money -= wk["price"]
+    w.journal("PAID %.2f TO BUILD %s" % (wk["price"], name))
+    w.start_project("BUILDING " + name, wk["ticks"], {}, {"work": name})
+    return True, "THE ENGINEERS START ON %s: %s." % (name, span(wk["ticks"]))
+
+
+# ---- the rival ----------------------------------------------------------------------
+def r_rival(w):
+    if not w.rival:
+        return ("\r\n  NOBODY ELSE IN TOWN RUNS A BUREAU. YET.\r\n\r\n")
+    r = w.rival
+    out = ["", "  " + r["name"], RULE,
+           "  AT          " + r["where"],
+           "  OPEN FOR    " + span(w.ticks - r["born"]),
+           "  THEY CHARGE %d%% OF LIST  (WE CHARGE %d%%)" % (r["price"], w.price),
+           "  STRENGTH    %d%%" % round(100 * r["strength"]),
+           "  THEY TAKE   %d%% OF OUR MARKET" % round(100 * w.rival_take()),
+           RULE]
+    out += fold("  ", "THEY TAKE MORE WHEN WE ARE DEARER, AND WITHER WHILE OUR "
+                      "REPUTATION IS %.0f OR MORE. THEY UNDERCUT OPEN OFFERS, COURT "
+                      "UNHAPPY CUSTOMERS, AND OFFER OUR STAFF JOBS." % C.RIVAL_REP_BEATS)
+    out.append("")
+    return joined(out)
+
+
+# ---- the bank -------------------------------------------------------------------------
+def r_bank(w):
+    out = ["", "  THE BANK MANAGER", RULE]
+    if w.loan:
+        out.append("  WE OWE        %.2f" % w.loan["owed"])
+        out.append("  INTEREST      %.3f A TICK (%.0f%% A DAY)" % (w.interest, 100 * C.LOAN_RATE_DAY))
+        out.append("  DUE IN        %s" % short(max(0, w.loan["due"] - w.ticks)))
+        out.append("  THEN THE BANK TAKES IT, OVERDRAWN OR NOT.")
+    else:
+        out.append("  WE OWE THE BANK NOTHING.")
+    if w.ticks < w.bank_barred:
+        out.append("  THE BANK WILL NOT LEND FOR %s." % short(w.bank_barred - w.ticks))
+    else:
+        out.append("  IT WOULD LEND  %.2f MORE" % w.loan_limit())
+    out.append(RULE)
+    out += fold("  ", "BORROW n, REPAY n (OR REPAY ALL). THE LIMIT FOLLOWS WHAT THE PLANT "
+                      "COST AND OUR REPUTATION. A NEW LOAN IS DUE IN %s." % span(C.LOAN_TERM))
+    out.append("")
+    return joined(out)
+
+
+def do_borrow(w, args):
+    try:
+        n = float(args[0])
+    except (IndexError, ValueError):
+        return False, "BORROW n"
+    if n <= 0:
+        return False, "THE BANK DOES NOT LEND NOTHING."
+    if w.ticks < w.bank_barred:
+        return False, "THE BANK WILL NOT LEND TO US FOR %s." % short(w.bank_barred - w.ticks)
+    limit = w.loan_limit()
+    if n > limit + 1e-6:
+        return False, "THE MANAGER WILL GO TO %.2f AND NO FURTHER." % limit
+    w.money += n
+    if w.loan:
+        w.loan["owed"] += n
+    else:
+        w.loan = {"owed": n, "due": w.ticks + C.LOAN_TERM}
+    w.journal("BORROWED %.2f" % n)
+    return True, ("BORROWED %.2f. WE OWE %.2f, AT %.3f A TICK IN INTEREST, DUE IN %s."
+                  % (n, w.loan["owed"], w.interest, short(w.loan["due"] - w.ticks)))
+
+
+def do_repay(w, args):
+    if not w.loan:
+        return False, "WE OWE THE BANK NOTHING."
+    if args and args[0].upper() == "ALL":
+        n = w.loan["owed"]
+    else:
+        try:
+            n = float(args[0])
+        except (IndexError, ValueError):
+            return False, "REPAY n   |   REPAY ALL"
+    n = min(n, w.loan["owed"])
+    if n <= 0 or w.money < n:
+        return False, "INSUFFICIENT FUNDS: CASH %.2f." % w.money
+    w.money -= n
+    w.loan["owed"] -= n
+    w.journal("REPAID %.2f" % n)
+    if w.loan["owed"] < 0.005:
+        w.loan = None
+        return True, "REPAID %.2f. WE OWE THE BANK NOTHING." % n
+    return True, "REPAID %.2f. WE STILL OWE %.2f." % (n, w.loan["owed"])
+
+
+def r_help(key=None):
+    """The whole manual, grouped; HELP <tab> for one section; HELP INDEX for
+    the tabs themselves (the window builds its tab row from that)."""
+    sections = C.HELP_SECTIONS
+    if key is None:
+        return C.HELP
+    key = key.upper()
+    if key == "INDEX":
+        return "TABS " + " ".join("%s=%s" % (k, t.replace(" ", "_")) for k, t, *_ in sections) + "\r\n"
+    match = [x for x in sections if x[0] == key or x[1] == key or x[1] == "THE " + key]
+    if not match:
+        return ("\r\n  NO SUCH PART OF THE MANUAL. TRY: %s\r\n\r\n"
+                % " ".join(k for k, *_ in sections))
+    _k, title, intro, rows = match[0]
+    out = [title, "  " + intro, ""] + ["  %-26s %s" % row for row in rows]
+    return "\r\n".join(out) + "\r\n"
+
+
+def plant_models(w):
+    w.sync_units()
+    counts = {}
+    for m in w.modules:
+        counts[m["model"]] = counts.get(m["model"], 0) + 1
+    return ", ".join("%d %s" % (k, name) for name, k in counts.items()) or "NONE"
+
+
+def r_machines(w):
+    """The catalogue: what can be bought this cycle, and what each is like."""
+    rule = "  " + "-" * (REPORT_WIDTH - 2)
+    out = ["", "  MACHINES ON SALE", rule]
+    for h, price in w.on_sale():
+        ahead = price > h["price_core"] + 1e-9
+        out.append("  %-11s %6.0f%s" % (h["name"], price, "  (A GENERATION AHEAD)" if ahead
+                                          else "  (STANDARD ISSUE)"))
+        out.append("      %d CALLERS  RUNS %.3f/TICK  BREAKS %s"
+                   % (h["core_users"], h["core_cost"],
+                      "AS OFTEN" if h["fault_mult"] == 1.0
+                      else "%d%% LESS" % round(100 * (1 - h["fault_mult"]))))
+        out += fold("      ", h["note"].upper() + ".")
+    out.append("")
+    out += fold("  ", "TYPE BUY TO ORDER ONE. REPLACE MODULE n <MODEL> TRADES AN OLD "
+                      "MODULE IN. EVERY UNIT WEARS: TYPE PLANT.")
+    out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
+def r_plant(w):
+    """Every module and the lines: model, age, how worn, what to do about it."""
+    w.sync_units()
+    rule = "  " + "-" * (REPORT_WIDTH - 2)
+    dead = {(f["kind"], f["n"]) for f in w.faults}
+    away = w.servicing()
+    out = ["", "  THE PLANT, UNIT BY UNIT", rule,
+           "  UNIT    MODEL          AGE   ODDS"]
+    for i, m in enumerate(w.modules, 1):
+        state = ("DOWN" if ("module", i) in dead else "SERVICE" if i == away else "")
+        wear = w.wear(m["born"])
+        out.append("  MOD %-3d %-10s %7s  %+4d%%  %s"
+                   % (i, m["model"], short(w.ticks - m["born"]), round(100 * (wear - 1)), state))
+    if w.line_born:
+        ages = [w.ticks - b for b in w.line_born]
+        oldest = max(range(len(ages)), key=lambda i: ages[i]) + 1
+        avg = sum(w.wear(b) for b in w.line_born) / len(w.line_born)
+        out.append("  %-3d LINES (AVERAGE)  %7s  %+4d%%"
+                   % (w.lines, short(sum(ages) / len(ages)), round(100 * (avg - 1))))
+        out.append("  OLDEST: LINE %d, %s" % (oldest, short(max(ages))))
+    out.append(rule)
+    out.append("  NEXT BREAKDOWN ROLL: %.0f%% CHANCE" % (100 * min(1.0, w.fault_chance())))
+    out.append("  SERVICE MODULE n    AN HOUR OUT, AS NEW")
+    out.append("  SERVICE LINES       OVERHAUL EVERY LINE")
+    out.append("  REPLACE MODULE n M  A NEW ONE NOW")
+    out.append("")
+    return "\r\n".join(out) + "\r\n"
+
+
+def do_service(w, args):
+    """SERVICE MODULE n, or SERVICE LINES. Returns (ok, message)."""
+    w.sync_units()
+    if not args:
+        return False, "SERVICE MODULE n   |   SERVICE LINES"
+    what = args[0].upper()
+    if w.project:
+        return False, ("THE ENGINEERS ARE BUSY WITH %s (%d TICKS LEFT). ONE JOB AT A TIME."
+                       % (w.project["name"], w.project["left"]))
+    mult = w.effects()["repair_mult"]
+    if what in ("LINE", "LINES"):
+        cost = round(w.lines * C.BALANCE["price_line"] * C.LINE_SERVICE_RATE * mult, 2)
+        if w.money < cost:
+            return False, "INSUFFICIENT FUNDS: THE OVERHAUL COSTS %.2f, CASH %.2f." % (cost, w.money)
+        w.money -= cost
+        w.journal("PAID %.2f FOR A LINE OVERHAUL" % cost)
+        w.start_project("LINE OVERHAUL", C.LINE_SERVICE_TICKS, C.LINE_SERVICE_WHILE,
+                        {"renew": ["lines"]})
+        return True, ("THE EXCHANGE OVERHAULS ALL %d LINES FOR %.2f: %s AT %d%% CAPACITY, "
+                      "THEN EVERY LINE IS AS GOOD AS NEW."
+                      % (w.lines, cost, span(C.LINE_SERVICE_TICKS),
+                         100 * C.LINE_SERVICE_WHILE["capacity_mult"]))
+    if what not in ("MODULE", "MODULES", "CORE", "CORES") or len(args) < 2:
+        return False, "SERVICE MODULE n   |   SERVICE LINES"
+    try:
+        n = int(args[1])
+    except ValueError:
+        return False, "THE NUMBER MUST BE A WHOLE NUMBER."
+    if not 1 <= n <= w.cores:
+        return False, "THERE IS NO MODULE %d." % n
+    if any(f["kind"] == "module" and f["n"] == n for f in w.faults):
+        return False, "MODULE %d IS DOWN: REPAIR IT FIRST, OR REPLACE IT." % n
+    model = w.module_model(n)
+    cost = round(model["price_core"] * C.SERVICE_RATE * mult, 2)
+    if w.money < cost:
+        return False, "INSUFFICIENT FUNDS: A SERVICE COSTS %.2f, CASH %.2f." % (cost, w.money)
+    w.money -= cost
+    w.journal("PAID %.2f TO SERVICE MODULE %d" % (cost, n))
+    w.start_project("SERVICE MODULE %d" % n, C.SERVICE_TICKS, {},
+                    {"renew": ["module", n]}, offline=n)
+    return True, ("MODULE %d COMES OUT OF THE RACK FOR %s, FOR %.2f. IT GOES BACK AS GOOD "
+                  "AS NEW." % (n, span(C.SERVICE_TICKS), cost))
+
+
+def upgrade_candidates(w, name):
+    """Modules worth upgrading to this model: lesser models, the most worn first."""
+    w.sync_units()
+    target = w.model(name)["core_users"]
+    dead = {f["n"] for f in w.faults_of("module")}
+    away = w.servicing()
+    cands = [n for n in range(1, w.cores + 1)
+             if w.module_model(n)["core_users"] < target and n != away]
+    return sorted(cands, key=lambda n: (n not in dead, w.module_model(n)["core_users"],
+                                        -w.wear(w.modules[n - 1]["born"])))
+
+
+def do_upgrade_modules(w, args):
+    """UPGRADE MODULES n <MODEL>: trade in the n most worn lesser modules."""
+    if len(args) < 3 or args[0].upper() not in ("MODULE", "MODULES"):
+        return False, "UPGRADE MODULES n <MODEL>"
+    try:
+        n = int(args[1])
+    except ValueError:
+        return False, "HOW MANY MUST BE A WHOLE NUMBER."
+    name = args[2].upper()
+    cands = upgrade_candidates(w, name)
+    if not cands:
+        return False, "NO MODULE OF OURS IS A LESSER MODEL THAN %s." % name
+    done, paid, last = 0, 0.0, ""
+    for m in cands[:max(0, n)]:
+        cash = w.money
+        ok, last = do_replace(w, ["MODULE", str(m), name])
+        if not ok:
+            break
+        done += 1
+        paid += cash - w.money
+    if not done:
+        return False, last
+    return True, ("%d MODULE%s UPGRADED TO %s FOR %.2f AFTER TRADE-INS. CAPACITY %d.%s"
+                  % (done, "" if done == 1 else "S", name, paid, w.capacity,
+                     "" if done == n else " STOPPED: " + last))
+
+
+def do_replace(w, args):
+    """REPLACE MODULE n [MODEL]: trade a module in for a new one now."""
+    w.sync_units()
+    if len(args) < 2 or args[0].upper() not in ("MODULE", "CORE"):
+        return False, "REPLACE MODULE n <MODEL>   (TYPE MACHINES FOR THE MODELS)"
+    try:
+        n = int(args[1])
+    except ValueError:
+        return False, "THE NUMBER MUST BE A WHOLE NUMBER."
+    if not 1 <= n <= w.cores:
+        return False, "THERE IS NO MODULE %d." % n
+    if w.servicing() == n:
+        return False, "MODULE %d IS OUT FOR SERVICE." % n
+    models = {h["name"]: price for h, price in w.on_sale()}
+    name = args[2].upper() if len(args) > 2 else w.hw_name
+    if name not in models:
+        return False, "%s IS NOT ON SALE. ON SALE: %s." % (name, ", ".join(models))
+    old = w.module_model(n)
+    down = any(f["kind"] == "module" and f["n"] == n for f in w.faults)
+    credit = old["price_core"] * (C.BALANCE["salvage_rate"] if down else C.TRADE_IN_RATE)
+    cost = round(models[name] - credit, 2)
+    if w.money < cost:
+        return False, ("INSUFFICIENT FUNDS: A %s COSTS %.2f LESS %.2f FOR THE OLD ONE, "
+                       "CASH %.2f." % (name, models[name], credit, w.money))
+    w.money -= cost
+    if down:
+        _drop_fault(w, "module", n)
+    w.modules[n - 1] = {"model": name, "born": w.ticks}
+    w.units_dirty = True
+    w.journal("REPLACED MODULE %d WITH A %s FOR %.2f" % (n, name, cost))
+    return True, ("MODULE %d IS NOW A NEW %s (%d CALLERS). PAID %.2f AFTER %.2f FOR THE "
+                  "OLD ONE. CAPACITY %d." % (n, name, w.model(name)["core_users"], cost,
+                                             credit, w.capacity))
+
+
 def capacity_line(w):
     """Say which limit is the binding one: that is what the player must buy."""
     cap = w.capacity
-    by_module = w.working_cores * w.hardware["core_users"]
+    by_module = w.module_room
     by_line = w.working_lines * C.BALANCE["line_users"]
     if cap == 0:
         why = "NOTHING IN SERVICE"
@@ -1173,7 +2082,7 @@ def capacity_line(w):
 
 
 def idle_lines_line(w):
-    spare = w.working_lines - w.working_cores * w.hardware["core_users"]
+    spare = w.working_lines - w.module_room
     if spare <= 0:
         return ""
     return ("  IDLE LINES              %3d   PAYING RENT FOR NOTHING. ADD A MODULE."
@@ -1205,25 +2114,7 @@ def r_goal(w):
     else:
         out.append("  AT THE CURRENT NET OF %.3f/TICK YOU ARE NOT GETTING THERE" % w.net)
     out.append("")
-    out.append("  BUY BUILDING   when you have the money")
-    out.append("")
-    return "\r\n".join(out) + "\r\n"
-
-
-def r_staff(w):
-    out = ["", "  STAFF", "  " + "-" * 52]
-    if not w.staff:
-        out.append("  NOBODY WORKS HERE BUT YOU.")
-    for role, info in w.staff.items():
-        data = C.ROLES[role]
-        out.append("  %-9s %-12s %.2f/TICK   %s" % (role, info["name"], data["salary"], data["desc"]))
-    out.append("  " + "-" * 52)
-    out.append("  SALARIES                 %.2f/TICK" % w.salaries)
-    out.append("")
-    for role, data in C.ROLES.items():
-        if role not in w.staff:
-            out.append("  HIRE %-9s %.0f FEE      %s" % (role, data["fee"], data["desc"]))
-    out.append("  FIRE <role>   let someone go")
+    out.append("  TYPE BUY: THE BUILDING IS ON THE ORDER FORM")
     out.append("")
     return "\r\n".join(out) + "\r\n"
 
@@ -1291,7 +2182,7 @@ def r_upgrades(w):
         else:
             out.append("  %-18s %8.0f   %s" % (name, data["price"], data["desc"]))
     out.append("")
-    out.append("  BUY <NAME>   e.g. BUY AUTOMATIC ANSWER")
+    out.append("  TYPE BUY TO ORDER ONE")
     out.append("")
     return "\r\n".join(out) + "\r\n"
 
@@ -1358,6 +2249,10 @@ def r_offers(w):
         if state == "LIVE":
             out.append("      %d ticks left, short on %d of them"
                        % (c["ticks_left"], c["breached"]))
+        a = w.accounts.get(c["company"])
+        if not c.get("lesson") and a and (a["met"] or a["short"] or a["goodwill"]):
+            out.append("      GOODWILL %+d: SERVED %d, SHORTED %d BEFORE"
+                       % (a["goodwill"], a["met"], a["short"]))
         if c.get("lesson"):
             out.append("      " + C.LESSON_GRANT.format(fee=c["fee"]))
             out.append("      " + lesson_hint(w, c))
@@ -1410,6 +2305,16 @@ def effect_rows(effects, indent="      "):
     return out
 
 
+def effect_brief(effects):
+    """The same as effect_rows, on one line: '+3 BATCH SLOTS, -15% BREAKDOWNS'."""
+    parts = []
+    for row in effect_rows(effects, indent=""):
+        label, amount = [x.strip() for x in row[3:].split("  ") if x.strip()][:2]
+        # "+3% CAPACITY" reads well; "QUEUED WORK PAYS +8 POINTS" reads the other way
+        parts.append("%s %s" % ((label, amount) if " " in amount else (amount, label)))
+    return ", ".join(parts)
+
+
 def r_effects(w):
     """Everything pushing the business up or down, by where it comes from."""
     rule = "  " + "-" * (REPORT_WIDTH - 2)
@@ -1427,10 +2332,20 @@ def r_effects(w):
             out.extend(rows)
             out.append("")
 
-    section("STAFF", [("%s %s" % (r, i["name"]), C.ROLES[r]["effects"],
-                       ["%-18s %.2f/TICK" % ("SALARY", C.ROLES[r]["salary"])])
+    section("YOUR PRICE", [("%d%% OF THE LIST RATE" % w.price, w.price_effects(), [])])
+    if w.rival:
+        section("THE RIVAL", [("%s (%d%% OF OUR LIST)" % (w.rival["name"][:26], w.rival["price"]),
+                               {"demand_mult": 1.0 - w.rival_take()}, [])])
+    section("STAFF", [("%s %s, LEVEL %d%s" % (r, i["name"], i.get("level", 1),
+                                             " (AWAY)" if i.get("away_until", 0) > w.ticks else ""),
+                       w.staff_effects(r),
+                       ["%-18s %.2f/TICK" % ("SALARY", C.ROLES[r]["salary"] * i.get("pay", 1.0))])
                       for r, i in sorted(w.staff.items())])
     section("EQUIPMENT", [(n, C.UPGRADES[n]["effects"], []) for n in sorted(w.owned)])
+    section("ENGINEERING", [(n, C.WORKS[n]["effects"], []) for n in sorted(w.works)])
+    if w.loan:
+        section("THE BANK", [("%.2f OWED" % w.loan["owed"], {},
+                              ["%-18s %.3f/TICK" % ("INTEREST", w.interest)])])
     if w.project:
         section("WORK UNDER WAY", [("%s (%s LEFT)" % (w.project["name"], short(w.project["left"])),
                                     w.project["while"], [])])
@@ -1473,8 +2388,8 @@ def r_incident(w):
     for i, (word, desc, _o) in enumerate(inc["choices"], 1):
         out += fold("  %d  %-10s " % (i, word), desc)
     out.append("")
-    out += fold("  ", "DECIDE <WORD>. LEFT UNANSWERED, IN %s IT IS %s." % (
-        short(w.incident["left"]), inc["default"]))
+    out += fold("  ", "DECIDE <WORD>. LEFT UNANSWERED, IT IS %s IN %s." % (
+        inc["default"], both_times(w, w.incident["left"])))
     out.append("")
     return "\r\n".join(out) + "\r\n"
 
@@ -1486,8 +2401,9 @@ def r_project(w):
     done = p["total"] - p["left"]
     bar = int(30 * done / max(1, p["total"]))
     out = ["", "  " + p["name"], "  " + "-" * (REPORT_WIDTH - 2),
-           "  [%s%s]  %d OF %d" % ("#" * bar, "." * (30 - bar), done, p["total"]),
-           "  %s LEFT" % short(p["left"]), ""]
+           "  [%s%s]  %d OF %d" % ("#" * bar, "." * (30 - bar), done, p["total"])]
+    out += fold("  ", both_times(w, p["left"]) + ".")
+    out.append("")
     if p["while"].get("capacity_mult") is not None:
         out += fold("  ", "MEANWHILE THE MACHINE RUNS AT %d%% OF CAPACITY."
                     % int(100 * p["while"]["capacity_mult"]))
@@ -1583,15 +2499,15 @@ def r_users(w):
     if refused > 0:
         lines.append("  " + "-" * 52)
         lines.append("  REFUSED A LINE: %d caller%s" % (refused, "" if refused == 1 else "s"))
-        by_module = w.working_cores * w.hardware["core_users"]
+        by_module = w.module_room
         by_line = w.working_lines * C.BALANCE["line_users"]
         if by_line <= by_module:
-            reason = "every dial-in line is carrying a caller  ->  BUY LINES n"
+            reason = "every dial-in line is carrying a caller  ->  more lines"
         else:
-            reason = "the modules cannot process another caller  ->  BUY CORES n"
+            reason = "the modules cannot process another caller  ->  more modules"
         lines.append("  REASON: %s" % reason)
         lines.append("  THEY HEAR A BUSY SIGNAL AND PAY NOTHING. REPUTATION FALLS.")
-        lines.append("  FIX: BUY LINES n (one caller each) or BUY CORES n (eight each)")
+        lines.append("  FIX: TYPE BUY. A LINE CARRIES ONE CALLER, A MODULE SEVERAL.")
     lines.append("")
     return "\r\n".join(lines) + "\r\n"
 
@@ -1608,7 +2524,7 @@ def r_jobs(w, rng):
         lines.append("  %d JOB%s WAITING FOR A SLOT. THEY PAY %.0f%% WHILE QUEUED."
                      % (w.queued, "" if w.queued == 1 else "S",
                         100 * C.BALANCE["queue_rate"]))
-        lines.append("  BUY SLOTS n   adds a slot for %.2f each" % C.BALANCE["price_slot"])
+        lines.append("  MORE SLOTS ARE %.2f EACH: TYPE BUY" % C.BALANCE["price_slot"])
     if w.served == 0:
         lines.append("  NOTHING IS RUNNING. NOBODY IS DIALED IN.")
     elif not w.queued:
@@ -1639,20 +2555,36 @@ def r_log(w):
 
 
 def do_buy(w, args):
-    """Returns (ok, message)."""
-    if len(args) < 2:
-        return False, "USAGE: BUY LINES n   |   BUY CORES n"
+    """Returns (ok, message). BUY CORES n buys the cycle's standard module;
+    BUY <MODEL> n (or BUY CORES n <MODEL>) buys any model on sale."""
+    models = {h["name"]: price for h, price in w.on_sale()}
+    every = {h["name"] for h in C.HARDWARE}
+    if not args:
+        return False, "USAGE: BUY LINES n   |   BUY CORES n   |   BUY <MODEL> n"
     what = args[0].upper()
+    model = None
+    if what in every:
+        model, what = what, "CORES"
+        args = ["CORES", args[1] if len(args) > 1 else "1"]
+    elif len(args) > 2 and args[2].upper() in every:
+        model = args[2].upper()
+    if len(args) < 2:
+        return False, "USAGE: BUY LINES n   |   BUY CORES n   |   BUY <MODEL> n"
     try:
         n = int(args[1])
     except ValueError:
         return False, "QUANTITY MUST BE A WHOLE NUMBER."
     if n <= 0 or n > 100:
         return False, "QUANTITY OUT OF RANGE."
+    if model and model not in models:
+        return False, ("NOBODY WILL SELL US A %s MODULE THIS CYCLE. ON SALE: %s. TYPE MACHINES."
+                       % (model, ", ".join(models)))
     if what in ("LINE", "LINES"):
         price, key = C.BALANCE["price_line"], "lines"
-    elif what in ("CORE", "CORES", "CPU"):
-        price, key = w.hardware["price_core"], "cores"
+    elif what in ("CORE", "CORES", "CPU", "MODULE", "MODULES"):
+        model = model or w.hw_name
+        price, key = models.get(model, w.hardware["price_core"]), "cores"
+        what = "%s MODULE%s" % (model, "" if n == 1 else "S")
     elif what in ("SLOT", "SLOTS", "CHANNEL", "CHANNELS"):
         price, key = C.BALANCE["price_slot"], "slots"
     else:
@@ -1671,20 +2603,26 @@ def do_buy(w, args):
     if key == "slots":
         w.buy_slot(n)
     else:
+        w.sync_units()
         setattr(w, key, getattr(w, key) + n)
+        if key == "cores":
+            w.modules += [{"model": model, "born": w.ticks} for _ in range(n)]
+        else:
+            w.line_born += [w.ticks] * n
+        w.units_dirty = True
     w.journal("PURCHASE: %d %s FOR %.2f" % (n, what, total))
     msg = ("%d %s INSTALLED. CASH %.2f. CAPACITY NOW %d, SLOTS %d, QUEUE %d."
            % (n, what, w.money, w.capacity, w.slots, w.queued))
-    if key == "lines" and w.lines > w.working_cores * w.hardware["core_users"]:
+    if key == "lines" and w.lines > w.module_room:
         msg += ("\r\n       NOTE: your %d module(s) can only serve %d callers, so "
                 "you now have %d line(s) that cannot carry anyone.\r\n"
-                "       BUY CORES 1 to put them to work."
-                % (w.working_cores, w.working_cores * w.hardware["core_users"],
-                   w.lines - w.working_cores * w.hardware["core_users"]))
-    if key == "cores" and w.working_cores * w.hardware["core_users"] > w.working_lines:
+                "       A MODULE would put them to work."
+                % (w.working_cores, w.module_room,
+                   w.lines - w.module_room))
+    if key == "cores" and w.module_room > w.working_lines:
         msg += ("\r\n       NOTE: modules can serve %d but you have %d lines. "
-                "BUY LINES n to fill them."
-                % (w.working_cores * w.hardware["core_users"], w.working_lines))
+                "More lines would fill them."
+                % (w.module_room, w.working_lines))
     return True, msg
 
 
@@ -1702,10 +2640,10 @@ def do_hire(w, args):
                        % (role, info["fee"], w.money))
     w.money -= info["fee"]
     name = C.ROLE_NAMES[(len(w.staff) * 5 + w.ticks // 97) % len(C.ROLE_NAMES)]
-    w.staff[role] = {"name": name}
+    w.staff[role] = new_staff(name)
     if w.db is not None:
-        w.db.execute("INSERT OR REPLACE INTO staff (role, name, level) VALUES (?,?,1)",
-                     (role, name))
+        w.db.execute("INSERT OR REPLACE INTO staff (role, name, level, data) VALUES (?,?,1,?)",
+                     (role, name, json.dumps(w.staff[role])))
     w.journal("HIRED %s %s FOR %.2f" % (role, name, info["fee"]))
     return True, ("%s %s STARTS MONDAY. SALARY %.2f/TICK. %s"
                   % (role, name, info["salary"], info["desc"]))
@@ -1833,7 +2771,7 @@ def do_accept(w, args):
                        % (lesson.split(":")[1], c["fee"]))
     if w.capacity < c["want"]:
         return False, ("WE CAN ONLY SERVE %d CALLERS AND THEY WANT %d. "
-                       "BUY LINES OR CORES FIRST, OR TAKE THE RISK LATER."
+                       "TYPE BUY FOR LINES AND MODULES FIRST, OR TAKE THE RISK LATER."
                        % (w.capacity, c["want"]))
     if len(w.active()) >= C.CONTRACT_MAX_ACTIVE:
         return False, ("WE CANNOT TAKE MORE THAN %d JOBS AT ONCE. CLOSE ONE FIRST: %s"
@@ -1865,6 +2803,7 @@ def do_close(w, args):
     allowed = c["duration"] * C.BALANCE["contract_breach_tolerance"]
     if c["breached"] > allowed:
         w.run["short"] += 1
+        w.goodwill_change(c["company"], -1, "short")
         w.money -= c["penalty"]
         w.rep = max(0.0, w.rep - 1.0)
         w.drop_contract(cid)
@@ -1873,6 +2812,7 @@ def do_close(w, args):
                       % (c["company"], c["breached"], c["penalty"]))
     share = min(1.0, held / float(c["duration"]))
     w.run["met"] += 1
+    w.goodwill_change(c["company"], +1, "met")
     payout = c["fee"] * share * C.CONTRACT_EARLY_BONUS
     w.money += payout
     w.rep = min(20.0, w.rep + 0.25)
@@ -1899,6 +2839,7 @@ def do_drop(w, args):
             c["company"], w.pay_lesson(c))
     w.drop_contract(cid)
     if c["state"] == "active":
+        w.goodwill_change(c["company"], -1, "short")
         return True, "%s DROPPED. THAT WILL BE REMEMBERED." % c["company"]
     return True, "%s TURNED DOWN. NO HARM DONE." % c["company"]
 
@@ -1923,6 +2864,10 @@ def do_sell(w, args):
             return False, ("WE HAVE %d WORKING LINE%s AND NEED AT LEAST ONE. "
                            "DEAD LINES ARE SCRAPPED, NOT SOLD: SCRAP LINE n."
                            % (len(working), "" if len(working) == 1 else "S"))
+        w.sync_units()
+        for gone in sorted(working[-n:], reverse=True):
+            del w.line_born[gone - 1]
+        w.units_dirty = True
         w.lines -= n
         renumber_lines(w, working[-n:])
         proceeds = n * C.BALANCE["price_line"] * rate
@@ -1990,14 +2935,18 @@ def do_scrap(w, args):
     if err:
         return False, err
     b = C.BALANCE
-    price = b["price_line"] if kind == "line" else w.hardware["price_core"]
+    price = b["price_line"] if kind == "line" else w.module_model(n)["price_core"]
     proceeds = round(price * b["salvage_rate"], 2)
     w.money += proceeds
     _drop_fault(w, kind, n)
+    w.sync_units()
     if kind == "line":
+        del w.line_born[n - 1]
         w.lines = max(0, w.lines - 1)
     else:
+        del w.modules[n - 1]
         w.cores = max(0, w.cores - 1)
+    w.units_dirty = True
     renumber(w, kind, [n])
     w.journal("SCRAPPED %s %d FOR %.2f" % (kind.upper(), n, proceeds))
     return True, ("%s %d STRIPPED AND SOLD FOR %.2f. CASH %.2f. CAPACITY NOW %d."
@@ -2140,7 +3089,7 @@ async def run_command(world, rng, lock, line, peer=None):
     if cmd in ("BYE", "QUIT", "EXIT", "LOGOFF"):
         return "\r\nCARRIER DROPPED. 73.\r\n\r\n", True
     if cmd == "HELP" or cmd == "?":
-        out = C.HELP
+        out = r_help(parts[1] if len(parts) > 1 else None)
     elif cmd == "STATUS":
         out = r_status(world)
     elif cmd == "TICK":
@@ -2183,8 +3132,63 @@ async def run_command(world, rng, lock, line, peer=None):
                 ok, msg = world.decide(parts[1])
                 world.save()
             out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
-    elif cmd in ("PROJECT", "PROJECTS", "WORKS"):
+    elif cmd in ("MACHINES", "MODELS", "CATALOGUE"):
+        out = r_machines(world)
+    elif cmd in ("PLANT", "AGES", "WEAR"):
+        out = r_plant(world)
+    elif cmd in ("SERVICE", "MAINTAIN"):
+        async with lock:
+            ok, msg = do_service(world, parts[1:])
+            world.save()
+        out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+    elif cmd == "UPGRADE":
+        async with lock:
+            ok, msg = do_upgrade_modules(world, parts[1:])
+            world.save()
+        out = ok_err(ok, msg)
+    elif cmd == "REPLACE":
+        async with lock:
+            ok, msg = do_replace(world, parts[1:])
+            world.save()
+        out = ("\r\n  OK: " if ok else "\r\n  ERR: ") + msg + "\r\n\r\n"
+    elif cmd in ("PROJECT", "PROJECTS"):
         out = r_project(world)
+    elif cmd in ("PRICE", "RATE", "TARIFF"):
+        if len(parts) > 1:
+            async with lock:
+                ok, msg = do_price(world, parts[1:])
+                world.save()
+            out = ok_err(ok, msg)
+        else:
+            out = r_price(world)
+    elif cmd in ("ACCOUNTS", "CUSTOMERS", "CLIENTS"):
+        out = r_accounts(world)
+    elif cmd == "TRAIN":
+        async with lock:
+            ok, msg = do_train(world, parts[1:])
+            world.save()
+        out = ok_err(ok, msg)
+    elif cmd in ("WORKS", "ENGINEERING"):
+        out = r_works(world)
+    elif cmd == "BUILD":
+        async with lock:
+            ok, msg = do_build(world, parts[1:])
+            world.save()
+        out = ok_err(ok, msg)
+    elif cmd in ("RIVAL", "COMPETITION", "COMPETITOR"):
+        out = r_rival(world)
+    elif cmd in ("BANK", "LOANS"):
+        out = r_bank(world)
+    elif cmd in ("BORROW", "LOAN"):
+        async with lock:
+            ok, msg = do_borrow(world, parts[1:])
+            world.save()
+        out = ok_err(ok, msg)
+    elif cmd == "REPAY":
+        async with lock:
+            ok, msg = do_repay(world, parts[1:])
+            world.save()
+        out = ok_err(ok, msg)
     elif cmd in ("STATEMENT", "RECORD"):
         out = "\r\n" + (world.statement or "  NO FINAL STATEMENT: WE HAVE NEVER BEEN CUT OFF.\r\n") + "\r\n"
     elif cmd in ("AWAY", "REPORT", "OVERNIGHT"):
@@ -2284,8 +3288,39 @@ async def run_command(world, rng, lock, line, peer=None):
         world.journal("BAD COMMAND FROM %s: %s" % (peer, line[:40]))
     return out, False
 
+def upgrade_offer(w, name, price):
+    """What swapping lesser modules for this model costs, one at a time."""
+    dead = {f["n"] for f in w.faults_of("module")}
+    costs = []
+    for n in upgrade_candidates(w, name):
+        old = w.module_model(n)["price_core"]
+        credit = old * (C.BALANCE["salvage_rate"] if n in dead else C.TRADE_IN_RATE)
+        costs.append(round(price - credit, 2))
+    return {"name": name, "users": w.model(name)["core_users"], "costs": costs}
+
+
+def shop(w):
+    """The order form's catalogue: everything BUY sells, at today's prices."""
+    fitting = (w.project.get("then") or {}).get("upgrade") if w.project else None
+    return {
+        "line": C.BALANCE["price_line"],
+        "slot": C.BALANCE["price_slot"],
+        "extra_slots": w.extra_slots,
+        "models": [{"name": h["name"], "price": round(price, 2), "users": h["core_users"],
+                    "ahead": price > h["price_core"] + 1e-9}
+                   for h, price in w.on_sale()],
+        "upgrade_to": [upgrade_offer(w, h["name"], price) for h, price in w.on_sale()],
+        "upgrades": [{"name": n, "price": u["price"], "desc": u["desc"],
+                      "owned": n in w.owned, "fitting": n == fitting}
+                     for n, u in C.UPGRADES.items()],
+        "building": {"price": round(w.goal_price, 2), "owned": bool(w.won_tick)},
+        "busy": w.project["name"] if w.project else "",
+    }
+
+
 def snapshot(world):
     """Everything the web page draws, computed from the same objects the terminal uses."""
+    world.sync_units()
     price = world.goal_price            # grows with each prestige, as BUY BUILDING charges
     return {
         "tick": world.ticks,
@@ -2299,6 +3334,20 @@ def snapshot(world):
         "machine": world.hw_name,
         "cycle": world.prestiges,
         "callers_per_core": world.hardware["core_users"],
+        "modules": [{"model": m["model"], "users": world.model(m["model"])["core_users"],
+                     "wear": round(world.wear(m["born"]), 2),
+                     "age": world.ticks - m["born"]} for m in world.modules],
+        "servicing": world.servicing(),
+        "price": world.price,
+        "pricing": {"min": C.PRICE_MIN, "max": C.PRICE_MAX, "fair": C.PRICE_FAIR,
+                    "elasticity": C.PRICE_ELASTICITY},
+        "mode": world.mode,
+        "shop": shop(world),
+        "rival": ({"name": world.rival["name"], "price": world.rival["price"],
+                   "take": round(world.rival_take(), 3)} if world.rival else None),
+        "loan": ({"owed": round(world.loan["owed"], 2), "due_in": world.loan["due"] - world.ticks}
+                 if world.loan else None),
+        "works": sorted(world.works),
         "site_index": world.site,
         "room": {"modules": world.room[0], "lines": world.room[1]},
         "ceiling": world.ceiling,
@@ -2325,8 +3374,11 @@ def snapshot(world):
         "goal": {"price": price, "pct": round(100.0 * min(1.0, world.money / price), 1)},
         "faults": [{"kind": f["kind"], "n": f["n"], "age": f["age"],
                     "cost": round(repair_cost(f["kind"], world), 2)} for f in world.faults],
-        "staff": [{"role": r, "name": i["name"],
-                   "salary": C.ROLES[r]["salary"]} for r, i in world.staff.items()],
+        "staff": [{"role": r, "name": i["name"], "level": i.get("level", 1),
+                   "morale": i.get("morale", 0),
+                   "away": i.get("away_why", "") if i.get("away_until", 0) > world.ticks else "",
+                   "salary": round(C.ROLES[r]["salary"] * i.get("pay", 1.0), 3)}
+                  for r, i in world.staff.items()],
         "mods": [{"name": m["name"], "left": m["ticks_left"], "good": m["good"]}
                  for m in world.mods],
         "offers": [{"id": c["id"], "company": c["company"], "work": c["work"],
@@ -2514,6 +3566,10 @@ async def serve(port, db_path, interval, web_port=0):
         db.execute("CREATE TABLE IF NOT EXISTS fault(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS upgrade(name TEXT PRIMARY KEY, n INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS staff(role TEXT PRIMARY KEY, name TEXT, level INTEGER)")
+        try:                      # a person's experience, mood, pay and absences
+            db.execute("ALTER TABLE staff ADD COLUMN data TEXT")
+        except sqlite3.OperationalError:
+            pass
         db.execute("CREATE TABLE IF NOT EXISTS mod(name TEXT PRIMARY KEY, ticks_left INTEGER, "
                    "effects TEXT, good INTEGER)")
         db.execute("""CREATE TABLE IF NOT EXISTS contract(
@@ -2521,6 +3577,8 @@ async def serve(port, db_path, interval, web_port=0):
             duration INTEGER, ticks_left INTEGER, fee REAL, penalty REAL,
             state TEXT, breached INTEGER)""")
         db.execute("CREATE TABLE IF NOT EXISTS pending(kind TEXT PRIMARY KEY, data TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS unit(kind TEXT, n INTEGER, model TEXT, "
+                   "born INTEGER, PRIMARY KEY (kind, n))")
         try:                      # teaching offers; saves from before lack it
             db.execute("ALTER TABLE contract ADD COLUMN lesson TEXT")
         except sqlite3.OperationalError:
@@ -2532,6 +3590,7 @@ async def serve(port, db_path, interval, web_port=0):
     world.load_upgrades()
     world.load_contracts()
     world.load_pending()
+    world.load_units()
     if interval:                 # only an explicit --tick overrides the saved rate
         world.tick_seconds = interval
     rng = random.Random()
@@ -2572,14 +3631,14 @@ def sim(ticks, seed, strategy):
         if _w.queued and _w.money > b["price_slot"] * 1.2:
             do_buy(_w, ["SLOTS", "1"])
             return
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 1.2:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
             do_buy(_w, ["LINES", "1"])
         elif _w.money > b["price_core"] * 1.2:
             do_buy(_w, ["CORES", "1"])
 
     def lines(_w, _t):
         """Keep one line per caller of capacity, hoard the rest."""
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 1.2:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
             do_buy(_w, ["LINES", "1"])
 
     def balanced(_w, _t):
@@ -2589,7 +3648,7 @@ def sim(ticks, seed, strategy):
         if _w.queued and _w.money > b["price_slot"] * 4:
             do_buy(_w, ["SLOTS", "1"])
             return
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 4:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 4:
             do_buy(_w, ["LINES", "1"])
         elif _w.money > b["price_core"] * 4:
             do_buy(_w, ["CORES", "1"])
@@ -2614,14 +3673,14 @@ def sim(ticks, seed, strategy):
         if _w.queued and _w.money > b["price_slot"] * 1.2:
             do_buy(_w, ["SLOTS", "1"])
             return
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 1.2:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
             do_buy(_w, ["LINES", "1"])
         elif _w.money > b["price_core"] * 1.2:
             do_buy(_w, ["CORES", "1"])
 
     def contractor(_w, _t):
         """Same buying as the engaged operator, plus it takes every offer it can staff."""
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 1.2:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
             do_buy(_w, ["LINES", "1"])
         elif _w.money > b["price_core"] * 1.2:
             do_buy(_w, ["CORES", "1"])
@@ -2631,7 +3690,7 @@ def sim(ticks, seed, strategy):
 
     def no_slots(_w, _t):
         """Same buying as the engaged operator, but never buys a slot."""
-        if _w.lines < _w.cores * _w.hardware["core_users"] and _w.money > b["price_line"] * 1.2:
+        if _w.lines < _w.module_room_all and _w.money > b["price_line"] * 1.2:
             do_buy(_w, ["LINES", "1"])
         elif _w.money > b["price_core"] * 1.2:
             do_buy(_w, ["CORES", "1"])

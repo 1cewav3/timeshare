@@ -184,9 +184,20 @@ class Machine:
         self.entry.delete(0, "end")
         if not line:
             return
-        if line.upper() in ("HELP", "?"):
-            # the manual is its own sheet; the last answer stays where it was
-            self.show_help(self.fetch("HELP"))     # a sheet, not a line of text
+        word = line.split()[0].upper()
+        if word in ("HELP", "?"):
+            # the manual is its own sheet, a tab at a time; the last answer stays
+            self.open_help(" ".join(line.split()[1:]).upper())
+            return
+        if word == "BUY":
+            # buying is done on the order form, not typed
+            self.open_form("buy_form", "order form — SYS/370-145",
+                           "N O R T H G A T E   ·   P U R C H A S E   O R D E R", build_buy)
+            return
+        if word in ("SETTINGS", "SETTING", "SET", "OPTIONS"):
+            self.open_form("settings_form", "settings — SYS/370-145",
+                           "N O R T H G A T E   ·   O P E R A T I N G   S E T T I N G S",
+                           build_settings)
             return
         self.log.append(("cmd", line))
         answer = self.fetch(line, seconds=2.0)
@@ -231,10 +242,37 @@ class Machine:
         # strip newlines only: the first line's indent is part of the layout
         return out.replace("OPR>", "").strip("\r\n")
 
-    def show_help(self, text):
-        """The manual, printed on a sheet of paper the length of the manual."""
-        self.show_sheet(text, "help_win", "operator's manual — SYS/370-145",
-                        "N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L")
+    def open_form(self, slot, title, heading, builder):
+        form = getattr(self, slot, None)
+        if form is not None and form.alive():
+            form.lift()
+            return
+        Form(self, slot, title, heading, builder).redraw(force=True)
+
+    def open_help(self, want=""):
+        """The manual on its own sheet, opened at the tab asked for, if any."""
+        form = getattr(self, "help_form", None)
+        if form is None or not form.alive():
+            form = Form(self, "help_form", "operator's manual — SYS/370-145",
+                        "N O R T H G A T E   ·   O P E R A T O R ' S   M A N U A L",
+                        build_help, watch=(), footer=False)
+            form.hint = "ESC closes this sheet   ·   LEFT / RIGHT OR PGUP / PGDN TURN THE TABS"
+
+            def turn(d):
+                keys = [k for k, _t in getattr(form, "tabs", [])] or ["DAY"]
+                here = form.qty.get("tab", keys[0])
+                form.qty["tab"] = keys[(keys.index(here) + d) % len(keys)]
+                form.redraw(force=True)
+            for key, d in (("<Left>", -1), ("<Right>", 1), ("<Prior>", -1), ("<Next>", 1)):
+                form.win.bind(key, lambda _e, d=d: turn(d))
+            form.redraw(force=True)                # fetches the tabs
+        if want:
+            want = want.replace("THE ", "")
+            for k, title in getattr(form, "tabs", []):
+                if want in (k, title, title.replace("THE ", "")):
+                    form.qty["tab"] = k
+        form.redraw(force=True)
+        form.lift()
 
     def show_effects(self):
         """Every trade, + and -, on its own sheet; reopening prints it fresh."""
@@ -353,7 +391,7 @@ class Machine:
         self.mod_rows = []
         for i in range(RACK_MODULES):
             y = 88 + i * 44
-            label = c.create_text(30, y, anchor="w", fill=STENCIL, font=mono(13),
+            label = c.create_text(30, y - 6, anchor="w", fill=STENCIL, font=mono(13),
                                   text="MOD %d" % (i + 1))
             dead = c.create_rectangle(139, y - 9, 389, y + 9, fill=PANEL, outline="")
             lamps = []
@@ -362,8 +400,9 @@ class Machine:
                 lamp = c.create_oval(0, 0, 0, 0, fill=OFF, outline="")
                 lamps.append((halo, lamp))
             tag = c.create_text(404, y, anchor="w", fill=FAULT, font=mono(11), text="")
+            info = c.create_text(30, y + 10, anchor="w", fill="#4a5240", font=mono(9), text="")
             self.mod_rows.append({"label": label, "lamps": lamps, "y": y,
-                                  "dead": dead, "tag": tag})
+                                  "dead": dead, "tag": tag, "info": info})
         self.lamp_layout = None
         self.layout_lamps(8)
 
@@ -494,6 +533,10 @@ class Machine:
         if self.poller.state:
             self.paint(self.poller.state)
             self.watch_statement(self.poller.state)
+            for slot in ("buy_form", "settings_form"):
+                form = getattr(self, slot, None)
+                if form is not None and form.alive():
+                    form.redraw()
         self.c.itemconfigure(self.note_text, text=self.note[-140:])
         self.root.after(200, self.refresh)
 
@@ -530,25 +573,52 @@ class Machine:
             math.ceil(max(cores, room_m) / RACK_MODULES),
             math.ceil(max(lines, room_l) / RACK_LINES))))
         self.rack = min(self.rack, self.racks - 1)
-        self.layout_lamps(per_core)
 
-        # callers fill working modules lowest first, across every rack. Lamps
-        # show the plant as built; capacity the works (or a power cut) take
-        # away shows as hollow lamps after the lit ones, and capacity the
-        # engineer squeezes out shows as a +n on the last busy module
+        # ---- the wiring. Each module's lamps are wired to a block of lines:
+        # MOD 1 to the first lines, MOD 2 to the next, one lamp per caller the
+        # module's model carries. Callers fill the lamps whose module and line
+        # both work. A dead line turns its lamp red; if a spare line beyond the
+        # wired block picks up that caller, the lamp stays lit in a red ring.
+        mods = list(s.get("modules") or [])
+        while len(mods) < cores:
+            mods.append({"model": "", "users": per_core, "wear": 1.0, "age": 0})
+        users = [max(1, int(m.get("users", per_core))) for m in mods[:cores]]
+        away = s.get("servicing")
+        first_slot, k = {}, 0
+        for n in range(1, cores + 1):
+            first_slot[n] = k
+            k += users[n - 1]
+        total_slots = k
+
+        def module_up(n):
+            return n not in down_mods and n != away
+
         raw = int(s.get("capacity_raw", working * per_core))
         cap = int(s.get("capacity", raw))
-        off = max(0, raw - cap)
-        loads, blocked, left, gone = {}, {}, min(served, raw), off
+        avail, red = [], []
         for n in range(1, cores + 1):
-            if n not in down_mods:
-                loads[n] = min(per_core, max(0, left))
-                left -= loads[n]
-                blocked[n] = min(per_core - loads[n], gone)
-                gone -= blocked[n]
+            if not module_up(n):
+                continue
+            for j in range(users[n - 1]):
+                line = first_slot[n] + j + 1
+                if line > lines:
+                    continue
+                (red if line in down_lines else avail).append((n, j))
+        callers = min(served, raw)
+        lit = set(avail[:callers])
+        rerouted = set(red[:max(0, callers - len(lit))])
+        taken = set(avail[len(lit):len(lit) + max(0, raw - cap)])
+        busy = {first_slot[n] + j + 1 for n, j in lit}
+        # every other caller (a dead line's caller, or one the staff squeezed in)
+        # rides a free working line: past the wired block, or one whose module
+        # is down or out for service
+        free = [ln for ln in range(1, lines + 1) if ln not in down_lines and ln not in busy]
+        busy |= set(free[:max(0, min(served, working_lines) - len(busy))])
+
+        # blue: places the staff squeeze out, a few per busy module
         extra = max(0, served - raw)
-        boost, rest = {}, extra             # blue lamps, a few per busy module
-        busy_mods = [n for n, v in loads.items() if v]
+        boost, rest = {}, extra
+        busy_mods = sorted({n for n, _j in lit | rerouted})
         while rest and busy_mods and any(boost.get(n, 0) < MAX_BOOST for n in busy_mods):
             for n in busy_mods:
                 if rest and boost.get(n, 0) < MAX_BOOST:
@@ -557,16 +627,18 @@ class Machine:
         last_busy = max(busy_mods, default=0)
 
         first_mod = self.rack * RACK_MODULES
+        page = [users[n - 1] for n in range(first_mod + 1, min(cores, first_mod + RACK_MODULES) + 1)]
+        self.layout_lamps(max(page or [per_core]))
+        pitch = getattr(self, "lamp_pitch", 30)
         slots_here = 0
         for i, row in enumerate(self.mod_rows):
             n = first_mod + i + 1
             installed = n <= cores
             dead = n in down_mods
-            load = loads.get(n, 0)
             has_slot = n <= max(cores, room_m)
             slots_here += has_slot
             vis = "normal" if has_slot else "hidden"
-            for item in (row["label"], row["dead"], row["tag"]):
+            for item in (row["label"], row["dead"], row["tag"], row["info"]):
                 c.itemconfigure(item, state=vis)
             c.itemconfigure(row["label"], text="MOD %d" % n)
             if not has_slot:
@@ -574,36 +646,60 @@ class Machine:
                     c.itemconfigure(halo, state="hidden")
                     c.itemconfigure(lamp, state="hidden")
                 continue
+            own = users[n - 1] if installed else per_core
             c.itemconfigure(row["label"], fill=STENCIL if installed else "#323828")
             if installed and dead:
                 c.itemconfigure(row["dead"], fill=FAULT, outline="")
                 c.itemconfigure(row["tag"], text="F A U L T", fill=FAULT)
+            elif installed and n == away:
+                c.itemconfigure(row["dead"], fill=PANEL, outline="")
+                c.itemconfigure(row["tag"], text="IN SERVICE", fill=TAKEN)
             else:
                 c.itemconfigure(row["dead"], fill=PANEL, outline="")
-                c.itemconfigure(row["tag"],
-                                text="" if installed else "spare",
+                c.itemconfigure(row["tag"], text="" if installed else "spare",
                                 fill="#4a5240")
             blue = boost.get(n, 0)
-            pitch = getattr(self, "lamp_pitch", 30)
-            c.coords(row["tag"], max(404, 150 + (per_core + blue - 1) * pitch + 16), row["y"])
+            c.coords(row["tag"], max(404, 150 + (own + blue - 1) * pitch + 16), row["y"])
             if installed and not dead and n == last_busy and rest:
                 c.itemconfigure(row["tag"], text="+%d" % rest, fill=BOOST)
-            shut = blocked.get(n, 0)
+            # model and age, faint; brighter once it is worn enough to matter
+            if installed:
+                m = mods[n - 1]
+                age = int(m.get("age", 0))
+                age_s = "%dD%02d" % (age // 1440, age % 1440 // 60) if age >= 1440 \
+                    else "%dH%02d" % (age // 60, age % 60)
+                worn = float(m.get("wear", 1.0)) >= 2.0     # brighter: worth a SERVICE
+                c.itemconfigure(row["info"], text="%s %s" % (m.get("model", ""), age_s),
+                                fill=STENCIL if worn else "#4a5240")
+            else:
+                c.itemconfigure(row["info"], text="")
             for j, (halo, lamp) in enumerate(row["lamps"]):
-                on = installed and not dead and j < load
-                if dead or j >= per_core + blue:
+                if dead or j >= own + blue:
                     c.itemconfigure(lamp, state="hidden")
                     c.itemconfigure(halo, state="hidden")
                     continue
-                if j >= per_core:                 # squeezed out by the staff
+                if j >= own:                      # squeezed out by the staff
                     c.itemconfigure(lamp, state="normal", fill=BOOST, outline="")
                     c.itemconfigure(halo, state="normal", fill=BOOST_GLOW)
                     continue
-                taken = not on and installed and load <= j < load + shut
-                c.itemconfigure(lamp, state="normal", outline="",
-                                fill=LAMP if on else (TAKEN if taken else OFF))
-                c.itemconfigure(halo, state="normal",
-                                fill=GLOW if on else (TAKEN_GLOW if taken else PANEL))
+                if not installed:
+                    c.itemconfigure(lamp, state="normal", fill=OFF, outline="")
+                    c.itemconfigure(halo, state="normal", fill=PANEL)
+                    continue
+                line = first_slot[n] + j + 1
+                if n == away or (n, j) in taken:   # out of service for the works
+                    fill, glow, ring = TAKEN, TAKEN_GLOW, ""
+                elif (n, j) in rerouted:           # its line is dead; a spare carries it
+                    fill, glow, ring = LAMP, FAULT_BG, FAULT
+                elif line <= lines and line in down_lines:
+                    fill, glow, ring = FAULT, FAULT_BG, ""
+                elif (n, j) in lit:
+                    fill, glow, ring = LAMP, GLOW, ""
+                else:
+                    fill, glow, ring = OFF, PANEL, ""
+                c.itemconfigure(lamp, state="normal", fill=fill, outline=ring,
+                                width=2 if ring else 1)
+                c.itemconfigure(halo, state="normal", fill=glow)
         c.itemconfigure(self.rack_empty,
                         text="" if slots_here else "NO MODULE SLOTS IN THIS RACK")
 
@@ -613,9 +709,9 @@ class Machine:
                 c.itemconfigure(rect, state="hidden")
                 c.itemconfigure(txt, state="hidden")
                 continue
-            mods = range(k * RACK_MODULES + 1, (k + 1) * RACK_MODULES + 1)
-            lns = range(k * RACK_LINES + 1, (k + 1) * RACK_LINES + 1)
-            faulty = any(m in down_mods for m in mods) or any(n in down_lines for n in lns)
+            mrange = range(k * RACK_MODULES + 1, (k + 1) * RACK_MODULES + 1)
+            lrange = range(k * RACK_LINES + 1, (k + 1) * RACK_LINES + 1)
+            faulty = any(m in down_mods for m in mrange) or any(n in down_lines for n in lrange)
             x = LX1 - 30 - (self.racks - 1 - k) * 28
             c.coords(rect, x, 60, x + 22, 76)
             c.coords(txt, x + 11, 68)
@@ -629,27 +725,20 @@ class Machine:
 
         # the engine's capacity is min(modules, lines): modules with no lines to
         # feed them add nothing, and the bar has to show that, not headroom
-        capacity = int(s.get("capacity", working * per_core))
+        capacity = cap
         pct = int(100 * served / max(1, capacity))
         c.itemconfigure(self.cores_text,
                         text="C O R E S   %d        L O A D   %d%%" % (cores, pct))
         c.coords(self.load_bar, 31, 495, 31 + int(2.99 * min(100, pct)), 505)
         note = ""
-        if capacity != raw:
-            note = "   %s%d: %s" % ("+" if capacity > raw else "", capacity - raw,
-                                    s.get("capacity_why") or "EFFECTS")
-            if capacity < raw:
-                note = "   %d OFF: %s" % (raw - capacity, s.get("capacity_why") or "EFFECTS")
+        if capacity > raw:
+            note = "   +%d: %s" % (capacity - raw, s.get("capacity_why") or "EFFECTS")
+        elif capacity < raw:
+            note = "   %d OFF: %s" % (raw - capacity, s.get("capacity_why") or "EFFECTS")
         c.itemconfigure(self.load_text, text="%d of %d callers%s" % (served, capacity, note))
 
-        # a caller takes the lowest working line: the busy ones lead the field
-        carrying = min(served, working_lines)
-        busy = set()
-        for n in range(1, lines + 1):
-            if len(busy) >= carrying:
-                break
-            if n not in down_lines:
-                busy.add(n)
+        # the line field agrees with the lamps: a line is busy when its lamp is
+        # lit, or when it is the spare carrying a dead line's caller
         first_line = self.rack * RACK_LINES
         for idx, (halo, lamp, num, cross) in enumerate(self.line_lamps):
             n = first_line + idx + 1
@@ -690,10 +779,21 @@ class Machine:
         c.coords(self.decision_text, side, 96 + self.head_ls * 3 // 2)
         c.coords(self.project_text, side, 96 + self.head_ls * 5 // 2)
         inc, proj = s.get("incident"), s.get("project")
-        c.itemconfigure(self.decision_text, text="DECISION WAITING" if inc else "")
+        ts = float(s.get("tick_seconds") or 60)
+        due = float(s.get("_fetched", time.time())) + float(s.get("to_next", 0))
+        into = max(0.0, due - time.time())          # seconds to the next tick
+
+        def left(ticks):
+            # real time until that many more ticks have passed, at today's rate
+            secs = max(0.0, (int(ticks) - 1) * ts + into)
+            secs = int(secs + 0.999)
+            return ("%dS" % secs if secs < 60 else "%dM%02dS" % (secs // 60, secs % 60)
+                    if secs < 3600 else "%dH%02dM" % (secs // 3600, secs % 3600 // 60))
+        c.itemconfigure(self.decision_text,
+                        text=("DECISION WAITING  %s" % left(inc["left"])) if inc else "")
         c.itemconfigure(self.project_text, text=(
-            "WORKS %d%%" % int(100 * (proj["total"] - proj["left"]) / max(1, proj["total"]))
-            if proj else ""))
+            "WORKS %d%%  %s" % (int(100 * (proj["total"] - proj["left"]) / max(1, proj["total"])),
+                                left(proj["left"])) if proj else ""))
 
         room = self.body_room
         rows = list(self.log)
@@ -751,6 +851,318 @@ class Machine:
         c.itemconfigure(self.goal_text, text="%.1f%% of %s  ·  %s to go" % (
             gpct, "{:,.0f}".format(goal.get("price", 0)),
             "{:,.0f}".format(max(0.0, goal.get("price", 0) - s.get("cash", 0.0)))))
+
+
+# ------------------------------------------------------------------ forms
+class Form:
+    """A sheet of paper in its own window that you can work: rows of text and
+    stamps you click. It redraws from /state whenever what it shows changes,
+    and prints the machine's answer to the last thing you did at the foot."""
+
+    ROW = 30
+
+    WATCH = ("cash", "cores", "lines", "room", "shop", "tick_seconds", "mode", "price", "slots")
+
+    def __init__(self, machine, slot, title, heading, builder, watch=WATCH, footer=True):
+        self.m = machine
+        self.heading = heading
+        self.builder = builder
+        self.watch = watch
+        self.footer = footer
+        self.qty = {}
+        self.result = ""
+        self.sig = None
+        self.win = tk.Toplevel(machine.root)
+        self.win.title(title)
+        self.win.configure(bg=PAPER)
+        self.win.resizable(False, False)
+        self.cw, self.ch = 880, 400
+        self.c = tk.Canvas(self.win, width=self.cw, height=self.ch, bg=PAPER,
+                           highlightthickness=0)
+        self.c.pack()
+        self.win.bind("<Escape>", lambda e: self.win.destroy())
+        self.placed = False
+        setattr(machine, slot, self)
+
+    def alive(self):
+        try:
+            return bool(self.win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def lift(self):
+        self.win.lift()
+        self.win.focus_force()
+
+    # -- drawing helpers, used by the builders ---------------------------------
+    def text(self, x, y, s, size=11, fill=INK, anchor="w", bold=True):
+        self.c.create_text(x, y, anchor=anchor, text=s, fill=fill, font=mono(size, bold))
+
+    def stamp(self, x0, y, label, action, width=None, lit=False, dim=False):
+        """A clickable box: lit is the current choice, dim cannot be done now
+        (it still asks the machine, which says why)."""
+        w = width or (16 + 9 * len(label))
+        ink = FADE if dim else INK
+        rect = self.c.create_rectangle(x0, y - 11, x0 + w, y + 11,
+                                       fill=INK if lit else PAPER, outline=ink, width=1)
+        txt = self.c.create_text(x0 + w / 2, y, text=label, font=mono(10),
+                                 fill=PAPER if lit else ink)
+        for item in (rect, txt):
+            self.c.tag_bind(item, "<Button-1>", lambda _e: action())
+            self.c.tag_bind(item, "<Enter>", lambda _e: self.c.config(cursor="hand2"))
+            self.c.tag_bind(item, "<Leave>", lambda _e: self.c.config(cursor=""))
+        return x0 + w
+
+    def counter(self, x0, y, key, lo, hi, steps=None, fmt="%d"):
+        """- n + : the quantity for one row of the form."""
+        n = self.qty.get(key, lo)
+
+        def nudge(d):
+            seq = steps or list(range(lo, hi + 1))
+            i = min(range(len(seq)), key=lambda k: abs(seq[k] - self.qty.get(key, lo)))
+            self.qty[key] = seq[max(0, min(len(seq) - 1, i + d))]
+            self.redraw(force=True)
+        self.stamp(x0, y, "-", lambda: nudge(-1), width=22)
+        self.text(x0 + 48, y, fmt % n, anchor="center")
+        self.stamp(x0 + 74, y, "+", lambda: nudge(+1), width=22)
+        for item in self.c.find_overlapping(x0 + 24, y - 10, x0 + 72, y + 10):
+            self.c.tag_bind(item, "<Button-4>", lambda _e: nudge(+1))
+            self.c.tag_bind(item, "<Button-5>", lambda _e: nudge(-1))
+        return n
+
+    def send(self, command):
+        """Ask the machine to do it; keep the answer for the foot of the sheet."""
+        answer = self.m.fetch(command, seconds=2.0)
+        rows = [r.strip() for r in answer.replace("\r", "").split("\n") if r.strip()]
+        self.result = rows[0] if rows else "the machine sent nothing back"
+        self.redraw(force=True)
+
+    # -- the sheet ------------------------------------------------------------
+    def redraw(self, force=False):
+        s = self.m.poller.state or {}
+        sig = json.dumps([s.get(k) for k in self.watch],
+                         sort_keys=True) + json.dumps(self.qty, sort_keys=True) + self.result
+        if sig == self.sig and not force:
+            return
+        self.sig = sig
+        c = self.c
+        c.delete("all")
+        c.create_text(30, 24, anchor="w", fill=FADE, font=mono(10), text=self.heading)
+        y = self.builder(self, s, 58)
+        y += 8
+        c.create_line(30, y, self.cw - 30, y, fill=FADE)
+        y += 20
+        if self.footer:
+            self.text(30, y, self.result or "NOTHING ORDERED YET.", size=10,
+                      fill=INK if self.result else FADE)
+            y += 26
+        self.text(30, y, getattr(self, "hint", "ESC closes this sheet"), size=9, fill=FADE)
+        ch = y + 22
+        for ry in range(58 + 13, ch - 10, self.ROW):        # ruled paper, under each row
+            c.tag_lower(c.create_line(26, ry, self.cw - 14, ry, fill=PAPER_RULE))
+        for ry in range(42, ch - 20, 22):
+            c.tag_lower(c.create_oval(10, ry, 16, ry + 6, fill=SHADOW, outline=""))
+        if ch != self.ch or not self.placed:
+            self.ch = ch
+            c.config(height=ch)
+            top = max(0, min(60, self.m.root.winfo_screenheight() - ch - 60))
+            self.win.geometry("%dx%d+90+%d" % (self.cw, ch, top))
+            self.placed = True
+
+
+def money(v):
+    return "{:,.2f}".format(v)
+
+
+def build_buy(f, s, y):
+    """The order form: plant, equipment, premises."""
+    cash = float(s.get("cash", 0.0))
+    shop = s.get("shop") or {}
+    room = s.get("room") or {}
+    f.text(30, y, "CASH %s" % money(cash), size=12)
+    f.text(330, y, "ROOM FOR %d MODULES AND %d LINES HERE"
+           % (room.get("modules", 0), room.get("lines", 0)), size=10, fill=FADE)
+    y += f.ROW + 6
+
+    def plant_row(y, key, name, price, info, have, cap, command):
+        f.text(40, y, name)
+        f.text(330, y, money(price), anchor="e")
+        f.text(350, y, info, size=10, fill=FADE)
+        f.text(552, y, ("%d/%d" % (have, cap)) if cap is not None else str(have),
+               size=10, anchor="e")
+        left = max(1, (cap - have) if cap is not None else 99)
+        f.qty[key] = max(1, min(f.qty.get(key, 1), left))
+        n = f.counter(568, y, key, 1, left)
+        total = n * price
+        full = cap is not None and have >= cap
+        f.text(748, y, money(total), anchor="e", fill=FADE if total > cash else INK)
+        f.stamp(764, y, "ORDER", lambda: f.send(command % n), width=86,
+                dim=full or total > cash)
+        return y + f.ROW
+
+    f.text(30, y, "P L A N T", size=10, fill=FADE)
+    for x, head, anchor in ((330, "EACH", "e"), (552, "HAVE", "e"), (618, "HOW MANY", "center"),
+                            (748, "TOTAL", "e")):
+        f.text(x, y, head, size=9, fill=FADE, anchor=anchor)
+    y += f.ROW - 6
+    lines, cores = int(s.get("lines", 0)), int(s.get("cores", 0))
+    y = plant_row(y, "lines", "DIAL-IN LINES", shop.get("line", 0),
+                  "ONE CALLER EACH",
+                  lines, room.get("lines"), "BUY LINES %d")
+    for m in shop.get("models", []):
+        y = plant_row(y, "mod:" + m["name"], "%s MODULE" % m["name"], m["price"],
+                      "%d CALLERS%s" % (m["users"], ", AHEAD" if m["ahead"] else ""),
+                      cores, room.get("modules"), "BUY " + m["name"] + " %d")
+    y = plant_row(y, "slots", "BATCH SLOTS", shop.get("slot", 0),
+                  "ONE MORE JOB AT ONCE",
+                  int(s.get("slots", 0)), None, "BUY SLOTS %d")
+
+    offers = [u for u in shop.get("upgrade_to", []) if u["costs"]]
+    if offers:
+        y += 6
+        f.text(30, y, "U P G R A D E   M O D U L E S", size=10, fill=FADE)
+        f.text(552, y, "CAN", size=9, fill=FADE, anchor="e")
+        y += f.ROW - 6
+        for u in offers:
+            key = "up:" + u["name"]
+            costs = u["costs"]
+            f.text(40, y, "TO " + u["name"])
+            f.text(330, y, money(costs[0]), anchor="e")
+            f.text(350, y, "%d CALLERS, TRADE-IN" % u["users"], size=10, fill=FADE)
+            f.text(552, y, str(len(costs)), size=10, anchor="e")
+            f.qty[key] = max(1, min(f.qty.get(key, 1), len(costs)))
+            n = f.counter(568, y, key, 1, len(costs))
+            total = sum(costs[:n])
+            f.text(748, y, money(total), anchor="e", fill=FADE if total > cash else INK)
+            f.stamp(764, y, "ORDER", lambda n=n, m=u["name"]: f.send("UPGRADE MODULES %d %s" % (n, m)),
+                    width=86, dim=total > cash)   # a swap is not engineers' work
+            y += f.ROW
+
+    y += 6
+    f.text(30, y, "E Q U I P M E N T", size=10, fill=FADE)
+    if shop.get("busy"):
+        f.text(330, y, "THE ENGINEERS ARE BUSY: " + shop["busy"], size=10, fill=FADE)
+    y += f.ROW - 6
+    for u in shop.get("upgrades", []):
+        f.text(40, y, u["name"])
+        f.text(330, y, money(u["price"]), anchor="e")
+        desc = u["desc"].upper()
+        if len(desc) > 50:                        # cut at a word, never mid-word
+            desc = desc[:49].rsplit(" ", 1)[0] + "…"
+        f.text(350, y, desc, size=10, fill=FADE)
+        if u["owned"]:
+            f.text(807, y, "OWNED", size=10, fill=FADE, anchor="center")
+        elif u["fitting"]:
+            f.text(807, y, "FITTING", size=10, fill=INK, anchor="center")
+        else:
+            f.stamp(764, y, "ORDER", lambda n=u["name"]: f.send("BUY " + n), width=86,
+                    dim=u["price"] > cash or bool(shop.get("busy")))
+        y += f.ROW
+
+    y += 6
+    f.text(30, y, "P R E M I S E S", size=10, fill=FADE)
+    y += f.ROW - 6
+    b = shop.get("building") or {}
+    f.text(40, y, "THE BUILDING")
+    f.text(330, y, money(b.get("price", 0)), anchor="e")
+    f.text(350, y, "THE RENT LINE GOES. PRESTIGE BECOMES POSSIBLE", size=10, fill=FADE)
+    if b.get("owned"):
+        f.text(807, y, "OURS", size=10, fill=FADE, anchor="center")
+    else:
+        f.stamp(764, y, "ORDER", lambda: f.send("BUY BUILDING"), width=86,
+                dim=b.get("price", 0) > cash)
+    return y + f.ROW - 10
+
+
+def build_help(f, s, y):
+    """The manual, a tab at a time. The tabs and every page come from the
+    machine (HELP INDEX, HELP <tab>), so content.py stays the one place to edit."""
+    if not getattr(f, "tabs", None):
+        answer = f.m.fetch("HELP INDEX")
+        f.tabs = [pair.split("=", 1) for pair in answer.split()[1:] if "=" in pair]
+        f.tabs = [(k, t.replace("_", " ")) for k, t in f.tabs] or [("DAY", "EVERY DAY")]
+        f.pages = {}
+    key = f.qty.get("tab", f.tabs[0][0])
+
+    def show(k):
+        f.qty["tab"] = k
+        f.redraw(force=True)
+    x = 30
+    for k, title in f.tabs:
+        x = f.stamp(x, y, title, lambda k=k: show(k), lit=k == key) + 8
+    y += f.ROW
+    if key not in f.pages:
+        f.pages[key] = f.m.fetch("HELP " + key).replace("\r", "").split("\n")
+    page = [r for r in f.pages[key] if r.strip()]
+    if not page:
+        f.text(40, y, "THE MACHINE SENT NOTHING BACK.", fill=FADE)
+        return y + f.ROW
+    f.text(30, y, page[0].strip(), size=12)
+    if len(page) > 1:
+        f.text(260, y, page[1].strip().upper(), size=10, fill=FADE)
+    y += f.ROW
+    for row in page[2:]:
+        command, desc = row[2:28].strip(), row[29:].strip()
+        f.text(40, y, command)
+        f.text(300, y, desc, bold=False)
+        y += f.ROW
+    return y - f.ROW + 10
+
+
+TICK_STEPS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 120, 300, 600, 1800, 3600]
+
+
+def build_settings(f, s, y):
+    """The clock, the mode, our price."""
+    ts = int(s.get("tick_seconds") or 60)
+    f.text(30, y, "T H E   C L O C K", size=10, fill=FADE)
+    y += f.ROW - 4
+    f.text(40, y, "SECONDS A TICK")
+    x = 250
+    for secs in (1, 3, 10, 60):
+        x = f.stamp(x, y, str(secs), lambda n=secs: (f.qty.update(tick=n), f.send("TICK %d" % n)),
+                    width=40, lit=ts == secs) + 8
+    f.text(x + 18, y, "OR", size=10, fill=FADE)
+    if f.qty.get("tick_seen") != ts:          # the clock moved: the counter follows
+        f.qty["tick"], f.qty["tick_seen"] = ts, ts
+    n = f.counter(x + 48, y, "tick", 1, 3600, steps=TICK_STEPS, fmt="%ds")
+    f.stamp(x + 156, y, "SET", lambda: f.send("TICK %d" % n), width=56, lit=False)
+    y += f.ROW
+    f.text(40, y, "ONE TICK IS ONE MINUTE IN THE BUREAU. NOW EVERY %d SECOND%s."
+           % (ts, "" if ts == 1 else "S"), size=10, fill=FADE)
+    y += f.ROW + 8
+
+    mode = s.get("mode", "wall")
+    f.text(30, y, "T H E   M O D E", size=10, fill=FADE)
+    y += f.ROW - 4
+    f.text(40, y, "THE WORLD RUNS")
+    x = f.stamp(250, y, "ON THE CLOCK", lambda: f.send("MODE WALL"), lit=mode == "wall") + 12
+    f.stamp(x, y, "ONLY WHILE ON", lambda: f.send("MODE SESSION"), lit=mode == "session")
+    y += f.ROW
+    f.text(40, y, "ON THE CLOCK: IT KEEPS GOING WHILE YOU ARE AWAY, AND REPORTS WHEN YOU "
+           "COME BACK." if mode == "wall" else
+           "ONLY WHILE ON: NOTHING MOVES WHILE NOBODY IS DIALLED IN.", size=10, fill=FADE)
+    y += f.ROW + 8
+
+    pr = s.get("pricing") or {"min": 50, "max": 200, "fair": 125, "elasticity": 1.3}
+    price = int(s.get("price", 100))
+    f.text(30, y, "O U R   P R I C E", size=10, fill=FADE)
+    y += f.ROW - 4
+    f.text(40, y, "PER CENT OF LIST")
+    if f.qty.get("price_seen") != price:
+        f.qty["price"], f.qty["price_seen"] = price, price
+    want = f.counter(250, y, "price", pr["min"], pr["max"],
+                     steps=list(range(pr["min"], pr["max"] + 1, 5)), fmt="%d%%")
+    f.stamp(358, y, "SET", lambda: f.send("PRICE %d" % want), width=56)
+    f.text(430, y, "NOW %d%%" % price, size=10, fill=INK)
+    y += f.ROW
+    callers = round(100 * ((want / 100.0) ** -pr["elasticity"] - 1))
+    note = "AT %d%%: %+d%% PER CALLER, %+d%% CALLERS FROM THE PRICE ALONE" % (
+        want, want - 100, callers)
+    if want > pr["fair"]:
+        note += ". OVER %d%%, REPUTATION SLIPS" % pr["fair"]
+    f.text(40, y, note, size=10, fill=FADE)
+    return y + f.ROW - 10
 
 
 def state_answers(web, host="127.0.0.1"):
